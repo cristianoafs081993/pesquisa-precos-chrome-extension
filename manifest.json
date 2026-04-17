@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Pesquisa de Precos - Compor",
+  "description": "Desmarca a coluna Compor em pesquisas de precos quando o preco unitario atende a regra configurada.",
+  "version": "1.0.7",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "action": {
+    "default_title": "Regra de Compor",
+    "default_popup": "popup.html"
+  }
+}

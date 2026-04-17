@@ -1,0 +1,152 @@
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #17202a;
+  --muted: #5d6d7e;
+  --line: #d7dde5;
+  --primary: #165fbd;
+  --primary-dark: #0d4388;
+  --danger: #a93226;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 360px;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 "Segoe UI", Tahoma, sans-serif;
+}
+
+.panel {
+  padding: 18px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+h2 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.hint {
+  margin: 0 0 16px;
+  color: var(--muted);
+}
+
+.hint.compact {
+  margin-bottom: 10px;
+}
+
+.section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.danger-zone {
+  margin-top: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.field input,
+.field select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-weight: 400;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0;
+  color: var(--muted);
+}
+
+.checkbox input {
+  margin-top: 3px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+button {
+  flex: 1;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--primary);
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+button:hover {
+  background: var(--primary-dark);
+}
+
+button.secondary {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--primary);
+}
+
+button.secondary:hover {
+  background: #eef4ff;
+}
+
+button.danger {
+  background: var(--danger);
+}
+
+button.danger:hover {
+  background: #7b241c;
+}
+
+button.full-width {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.status {
+  min-height: 20px;
+  margin-top: 14px;
+  color: var(--muted);
+}
+
+.status.error {
+  color: var(--danger);
+}

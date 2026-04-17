@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Regra de Compor</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="panel">
+      <h1>Regra de Compor</h1>
+      <p class="hint">
+        Use na tela da pesquisa de precos. A extensao localiza as colunas
+        <strong>Preco unitario</strong> e <strong>Compor</strong>.
+      </p>
+
+      <section class="section">
+        <h2>Desmarcar Compor</h2>
+        <label class="field">
+          <span>Criterio para desmarcar</span>
+          <select id="mode">
+            <option value="between">Preco dentro da faixa informada</option>
+            <option value="outside">Preco fora da faixa permitida</option>
+            <option value="above">Preco acima do minimo</option>
+            <option value="below">Preco abaixo do maximo</option>
+          </select>
+        </label>
+      </section>
+
+      <div class="grid">
+        <label class="field">
+          <span>Minimo</span>
+          <input id="minPrice" type="text" inputmode="decimal" placeholder="50">
+        </label>
+        <label class="field">
+          <span>Maximo</span>
+          <input id="maxPrice" type="text" inputmode="decimal" placeholder="100">
+        </label>
+      </div>
+
+      <label class="checkbox">
+        <input id="inclusive" type="checkbox">
+        <span>Incluir valores iguais aos limites</span>
+      </label>
+
+      <label class="checkbox">
+        <input id="scanAllPages" type="checkbox" checked>
+        <span>Tentar processar todas as linhas carregadas na pagina</span>
+      </label>
+
+      <button id="floatingPanel" type="button" class="secondary full-width">Abrir painel flutuante</button>
+
+      <div class="actions">
+        <button id="preview" type="button" class="secondary">Pre-visualizar</button>
+        <button id="apply" type="button">Desmarcar Compor</button>
+      </div>
+      <button id="undo" type="button" class="secondary full-width">Desfazer ultima aplicacao</button>
+
+      <section class="section danger-zone">
+        <h2>Excluir itens</h2>
+        <p class="hint compact">
+          Exclui apenas precos abaixo do minimo ou acima do maximo. O motivo e escolhido automaticamente.
+        </p>
+        <button id="delete" type="button" class="danger full-width">Excluir abaixo/acima dos limites</button>
+      </section>
+
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
