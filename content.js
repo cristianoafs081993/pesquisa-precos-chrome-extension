@@ -1,5 +1,5 @@
 (() => {
-const EXTENSION_SCRIPT_VERSION = "1.0.7";
+const EXTENSION_SCRIPT_VERSION = "2.5.0";
 
 if (window.__ppComporExtensionVersion === EXTENSION_SCRIPT_VERSION) {
   return;
@@ -14,6 +14,9 @@ const CLICK_DELAY_MS = 500;
 const DELETE_DELAY_MS = 1200;
 const MODAL_TIMEOUT_MS = 7000;
 const MODAL_CLOSE_TIMEOUT_MS = 3000;
+const MARKET_BUTTON_CLASS = "pp-market-item-button";
+const MARKET_STATUS_CLASS = "pp-market-row-status";
+const DEFAULT_MARKET_SEARCH_ENDPOINT = "http://localhost:8787/search";
 const DELETE_REASON_LOW = {
   option: "valor inexequivel",
   justification: "Preco abaixo do minimo configurado."
@@ -43,6 +46,35 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
+
+bootstrapMarketItemPage();
+
+function bootstrapMarketItemPage() {
+  if (!location.href.startsWith("https://pesqpreco.estaleiro.serpro.gov.br/")) {
+    return;
+  }
+
+  const boot = () => {
+    if (!document.body) {
+      window.setTimeout(boot, 250);
+      return;
+    }
+
+    // Angular renderiza a tabela de itens de forma tardia; por isso o boot
+    // instala o observer e faz novas tentativas curtas apos o carregamento.
+    ensureFloatingPanelStyle();
+    ensureMarketItemButtons();
+    startMarketItemObserver();
+    window.setTimeout(ensureMarketItemButtons, 1000);
+    window.setTimeout(ensureMarketItemButtons, 2500);
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
+  } else {
+    boot();
+  }
+}
 
 function getMessageTask(message) {
   if (message.type === "PP_UNDO_COMPOR_RULE_V2") {
@@ -749,11 +781,14 @@ function findCloseDialogButton(dialog) {
 
 function showFloatingPanel(initialSettings) {
   ensureFloatingPanelStyle();
+  ensureMarketItemButtons();
+  startMarketItemObserver();
 
   const existing = document.querySelector("#pp-compor-floating-panel");
   if (existing) {
     existing.style.display = "block";
     existing.querySelector("[data-pp-status]").textContent = "Painel pronto.";
+    ensureMarketItemButtons();
     return;
   }
 
@@ -807,6 +842,22 @@ function showFloatingPanel(initialSettings) {
       <button type="button" class="pp-floating-secondary" data-pp-action="undo">Desfazer desmarcar</button>
       <button type="button" class="pp-floating-danger" data-pp-action="delete">Excluir abaixo/acima</button>
       <div class="pp-floating-status" data-pp-status>Painel pronto.</div>
+      <section class="pp-market-section">
+        <div class="pp-market-heading">
+          <strong>Pesquisa de mercado</strong>
+          <button type="button" class="pp-floating-secondary" data-pp-session>Ver sessao</button>
+        </div>
+        <label>
+          <span>Backend de busca</span>
+          <input data-pp-search-endpoint type="url" placeholder="http://localhost:8787/search">
+        </label>
+        <label>
+          <span>Token do backend (opcional)</span>
+          <input data-pp-search-token type="password" placeholder="Bearer/API key">
+        </label>
+        <div class="pp-market-current" data-pp-market-current>Nenhum item selecionado. Use o botao de lupa na tabela de itens.</div>
+        <div class="pp-market-results" data-pp-market-results></div>
+      </section>
     </div>
   `;
 
@@ -825,8 +876,16 @@ function showFloatingPanel(initialSettings) {
   panel.querySelectorAll("[data-pp-action]").forEach((button) => {
     button.addEventListener("click", () => runFloatingAction(panel, button.dataset.ppAction));
   });
+  panel.querySelector("[data-pp-session]").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    renderMarketSession(panel);
+  });
+  panel.querySelector("[data-pp-search-endpoint]").addEventListener("change", () => saveMarketConfig(panel));
+  panel.querySelector("[data-pp-search-token]").addEventListener("change", () => saveMarketConfig(panel));
 
   makeFloatingPanelDraggable(panel);
+  loadMarketConfig(panel);
 }
 
 async function runFloatingAction(panel, action) {
@@ -951,7 +1010,8 @@ function ensureFloatingPanelStyle() {
       top: 88px;
       right: 24px;
       z-index: 2147483000;
-      width: 340px;
+      width: min(520px, calc(100vw - 24px));
+      max-height: calc(100vh - 110px);
       background: #ffffff;
       border: 1px solid #cbd5e1;
       border-radius: 12px;
@@ -986,6 +1046,8 @@ function ensureFloatingPanelStyle() {
       display: grid;
       gap: 10px;
       padding: 12px;
+      max-height: calc(100vh - 164px);
+      overflow: auto;
     }
     #pp-compor-floating-panel label {
       display: grid;
@@ -1046,8 +1108,682 @@ function ensureFloatingPanelStyle() {
     #pp-compor-floating-panel.dragging {
       opacity: 0.92;
     }
+    #pp-compor-floating-panel .pp-market-section {
+      display: grid;
+      gap: 10px;
+      margin-top: 8px;
+      padding-top: 10px;
+      border-top: 1px solid #cbd5e1;
+    }
+    #pp-compor-floating-panel .pp-market-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    #pp-compor-floating-panel .pp-market-heading button {
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+    #pp-compor-floating-panel .pp-market-current,
+    #pp-compor-floating-panel .pp-market-card,
+    #pp-compor-floating-panel .pp-market-session-item {
+      border: 1px solid #d8dee8;
+      border-radius: 10px;
+      padding: 9px;
+      background: #f8fafc;
+    }
+    #pp-compor-floating-panel .pp-market-results {
+      display: grid;
+      gap: 8px;
+      max-height: 52vh;
+      overflow: auto;
+    }
+    #pp-compor-floating-panel .pp-market-card h4,
+    #pp-compor-floating-panel .pp-market-session-item h4 {
+      margin: 0 0 4px;
+      font-size: 13px;
+      color: #123f73;
+    }
+    #pp-compor-floating-panel .pp-market-card p,
+    #pp-compor-floating-panel .pp-market-session-item p {
+      margin: 4px 0;
+      color: #475569;
+    }
+    #pp-compor-floating-panel .pp-market-card img {
+      width: 54px;
+      height: 54px;
+      object-fit: cover;
+      border-radius: 8px;
+      border: 1px solid #d8dee8;
+      float: left;
+      margin-right: 8px;
+    }
+    #pp-compor-floating-panel .pp-market-card-actions,
+    #pp-compor-floating-panel .pp-market-edit-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      clear: both;
+      margin-top: 8px;
+    }
+    #pp-compor-floating-panel .pp-market-card-actions button,
+    #pp-compor-floating-panel .pp-market-session-actions button {
+      padding: 7px 8px;
+      font-size: 12px;
+    }
+    #pp-compor-floating-panel .pp-market-muted {
+      color: #64748b;
+      font-size: 12px;
+    }
+    #pp-compor-floating-panel .pp-market-success {
+      color: #166534;
+      font-weight: 700;
+    }
+    #pp-compor-floating-panel .pp-market-summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin-top: 8px;
+    }
+    #pp-compor-floating-panel .pp-market-summary strong {
+      display: block;
+      font-size: 16px;
+      color: #123f73;
+    }
+    #pp-compor-floating-panel .pp-market-summary span {
+      display: block;
+      color: #64748b;
+      font-size: 11px;
+    }
+    #pp-compor-floating-panel .pp-market-session-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .${MARKET_BUTTON_CLASS} {
+      margin-left: 4px !important;
+      background: #0f766e !important;
+      color: #ffffff !important;
+    }
+    .${MARKET_STATUS_CLASS} {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: #e0f2fe;
+      color: #075985;
+      font-size: 11px;
+      font-weight: 700;
+      vertical-align: middle;
+    }
   `;
   document.documentElement.append(style);
+}
+
+function startMarketItemObserver() {
+  if (window.__ppMarketItemObserver) {
+    return;
+  }
+
+  window.__ppMarketItemObserver = new MutationObserver(() => {
+    window.clearTimeout(window.__ppMarketItemObserverTimer);
+    window.__ppMarketItemObserverTimer = window.setTimeout(ensureMarketItemButtons, 250);
+  });
+  window.__ppMarketItemObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+function ensureMarketItemButtons() {
+  const table = document.querySelector(".tabela-itens p-table, .tabela-itens table") || document.querySelector(".tabela-itens");
+  if (!table) {
+    return;
+  }
+
+  const rows = Array.from(table.querySelectorAll("tbody.p-datatable-tbody tr, tbody tr"))
+    .filter((row) => getMarketRowCells(row).length >= 8);
+
+  rows.forEach((row) => {
+    if (row.querySelector(`.${MARKET_BUTTON_CLASS}`)) {
+      refreshMarketRowStatus(row);
+      return;
+    }
+
+    const item = parseMarketItemRow(row);
+    if (!item) {
+      return;
+    }
+
+    const actionsCell = getMarketRowCells(row).at(-1);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `br-button circle small text-overflow-descricao ${MARKET_BUTTON_CLASS}`;
+    button.title = "Pesquisar mercado";
+    button.setAttribute("aria-label", "Pesquisar mercado");
+    button.textContent = "M";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openMarketItemPanel(parseMarketItemRow(row));
+    });
+
+    actionsCell.append(button);
+    refreshMarketRowStatus(row);
+  });
+}
+
+function getMarketRowCells(row) {
+  return Array.from(row.querySelectorAll(":scope > td, :scope > th"));
+}
+
+function parseMarketItemRow(row) {
+  const cells = getMarketRowCells(row);
+  if (cells.length < 8) {
+    return null;
+  }
+
+  const descriptionElement = cells[2]?.querySelector("[ng-reflect-tooltip], .text-overflow-descricao, span") || cells[2];
+  const descricao = cleanText(descriptionElement?.getAttribute?.("ng-reflect-tooltip")) ||
+    cleanText(descriptionElement?.textContent);
+  const numero = cleanText(cells[1]?.textContent);
+
+  if (!numero || !descricao) {
+    return null;
+  }
+
+  const item = {
+    itemKey: createMarketItemKey(numero, descricao),
+    numero,
+    descricao,
+    quantidade: cleanText(cells[3]?.textContent),
+    unidade: cleanText(cells[4]?.textContent),
+    atualizadoEm: cleanText(cells[5]?.textContent),
+    media: cleanText(cells[6]?.textContent),
+    mediana: cleanText(cells[7]?.textContent),
+    termoBusca: buildDefaultSearchTerm(descricao),
+    status: "pendente",
+    cotacoes: {}
+  };
+
+  return item;
+}
+
+function createMarketItemKey(numero, descricao) {
+  return `${numero}-${normalizeText(descricao).slice(0, 80)}`;
+}
+
+function buildDefaultSearchTerm(descricao) {
+  return cleanText(descricao)
+    .replace(/^\d+\s*-\s*/, "")
+    .replace(/\s*,\s*/g, " ")
+    .replace(/\b(material|estrutura|cor|aplicacao|caracteristicas adicionais|altura|largura|profundidade)\s*:/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+}
+
+function cleanText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+async function openMarketItemPanel(item) {
+  if (!item) {
+    return;
+  }
+
+  showFloatingPanel({});
+  const panel = document.querySelector("#pp-compor-floating-panel");
+  panel.style.display = "block";
+  const storedItem = await upsertMarketItem(item);
+  await renderMarketItem(panel, storedItem);
+  await refreshMarketRowStatuses();
+
+  if (!storedItem.lastResults?.length) {
+    await searchMarketForItem(panel, storedItem, { automatic: true });
+  }
+}
+
+async function loadMarketConfig(panel) {
+  const config = await chrome.storage.sync.get({
+    marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT,
+    marketSearchToken: ""
+  });
+  panel.querySelector("[data-pp-search-endpoint]").value = config.marketSearchEndpoint || DEFAULT_MARKET_SEARCH_ENDPOINT;
+  panel.querySelector("[data-pp-search-token]").value = config.marketSearchToken || "";
+}
+
+async function saveMarketConfig(panel) {
+  await chrome.storage.sync.set({
+    marketSearchEndpoint: panel.querySelector("[data-pp-search-endpoint]").value.trim(),
+    marketSearchToken: panel.querySelector("[data-pp-search-token]").value.trim()
+  });
+}
+
+async function renderMarketItem(panel, item) {
+  const session = await getMarketSession();
+  const storedItem = session.items[item.itemKey] || item;
+  const acceptedCount = Object.values(storedItem.cotacoes || {}).filter((quote) => quote.status === "accepted").length;
+  const current = panel.querySelector("[data-pp-market-current]");
+  const results = panel.querySelector("[data-pp-market-results]");
+
+  current.innerHTML = `
+    <strong>Item ${escapeHtml(storedItem.numero)}</strong>
+    <p>${escapeHtml(storedItem.descricao)}</p>
+    <p class="pp-market-muted">Quantidade: ${escapeHtml(storedItem.quantidade || "-")} ${escapeHtml(storedItem.unidade || "")} | Media: ${escapeHtml(storedItem.media || "-")} | Cotacoes aceitas: ${acceptedCount}/3</p>
+    <label>
+      <span>Termo de busca</span>
+      <input data-pp-market-query type="text" value="${escapeHtml(storedItem.termoBusca || buildDefaultSearchTerm(storedItem.descricao))}">
+    </label>
+    <div class="pp-market-card-actions">
+      <button type="button" data-pp-market-search>Buscar mercado</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-export>Exportar JSON</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-import>Importar JSON</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-report>Gerar relatorio</button>
+    </div>
+  `;
+
+  if (storedItem.lastResults?.length) {
+    results.innerHTML = renderMarketResults(storedItem, storedItem.lastResults);
+    attachMarketResultEvents(panel, storedItem, storedItem.lastResults);
+  } else {
+    results.innerHTML = renderAcceptedQuotes(storedItem);
+  }
+
+  current.querySelector("[data-pp-market-search]").addEventListener("click", () => searchMarketForItem(panel, storedItem));
+  current.querySelector("[data-pp-market-export]").addEventListener("click", exportMarketSession);
+  current.querySelector("[data-pp-market-import]").addEventListener("click", importMarketSession);
+  current.querySelector("[data-pp-market-report]").addEventListener("click", openMarketReport);
+}
+
+function renderAcceptedQuotes(item) {
+  const quotes = Object.values(item.cotacoes || {}).filter((quote) => quote.status === "accepted");
+  if (!quotes.length) {
+    return `<div class="pp-market-muted">Nenhuma cotacao aceita ainda.</div>`;
+  }
+
+  return quotes.map((quote) => `
+    <article class="pp-market-card">
+      <h4>${escapeHtml(quote.titulo)}</h4>
+      <p>${escapeHtml(quote.dominio)} | ${escapeHtml(quote.precoEditado || "preco nao informado")}</p>
+      <p class="pp-market-success">Selecionada para relatorio</p>
+    </article>
+  `).join("");
+}
+
+async function searchMarketForItem(panel, item, options = {}) {
+  const status = panel.querySelector("[data-pp-status]");
+  const results = panel.querySelector("[data-pp-market-results]");
+  const queryInput = panel.querySelector("[data-pp-market-query]");
+  const query = queryInput.value.trim();
+
+  status.classList.remove("error");
+  if (!query) {
+    status.classList.add("error");
+    status.textContent = "Informe um termo de busca para pesquisar mercado.";
+    return;
+  }
+
+  status.textContent = options.automatic
+    ? "Item selecionado. Buscando precos no servico local..."
+    : "Buscando precos no servico local...";
+  results.innerHTML = `<div class="pp-market-muted">Consultando fornecedores configurados. Mantenha o servico local em execucao.</div>`;
+  await saveMarketConfig(panel);
+
+  const config = await chrome.storage.sync.get({
+    marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT,
+    marketSearchToken: ""
+  });
+  const session = await getMarketSession();
+  session.items[item.itemKey] = {
+    ...session.items[item.itemKey],
+    termoBusca: query,
+    status: "em pesquisa"
+  };
+  await saveMarketSession(session);
+
+  // A busca roda no background script para evitar restricoes de CORS da pagina
+  // do Compras.gov.br e manter um contrato unico com o servico local.
+  const response = await sendRuntimeMessage({
+    type: "PP_MARKET_SEARCH",
+    payload: {
+      endpoint: config.marketSearchEndpoint || DEFAULT_MARKET_SEARCH_ENDPOINT,
+      token: config.marketSearchToken,
+      query,
+      itemId: item.itemKey,
+      pesquisaId: session.pesquisaId
+    }
+  });
+
+  if (!response.ok) {
+    status.classList.add("error");
+    status.textContent = response.message || "Busca falhou.";
+    return;
+  }
+
+  session.items[item.itemKey].lastResults = response.results || [];
+  await saveMarketSession(session);
+  results.innerHTML = renderMarketResults(item, response.results || []);
+  attachMarketResultEvents(panel, item, response.results || []);
+  status.textContent = `${response.results?.length || 0} resultados retornados.`;
+  await refreshMarketRowStatuses();
+}
+
+function renderMarketResults(item, results) {
+  if (!results.length) {
+    return `<div class="pp-market-muted">Nenhum resultado retornado.</div>`;
+  }
+
+  return results.map((result, index) => `
+    <article class="pp-market-card" data-pp-result-index="${index}">
+      ${result.thumbnailLink ? `<img alt="" src="${escapeAttribute(result.thumbnailLink)}">` : ""}
+      <h4>${escapeHtml(result.title)}</h4>
+      <p>${escapeHtml(result.displayLink)}</p>
+      <p>${escapeHtml(result.snippet)}</p>
+      <div class="pp-market-edit-grid">
+        <input data-pp-price placeholder="Preco encontrado" value="${escapeAttribute(result.price || "")}">
+        <input data-pp-supplier placeholder="Fornecedor" value="${escapeAttribute(result.displayLink || "")}">
+      </div>
+      <input data-pp-note placeholder="Observacao/aderencia do produto">
+      <div class="pp-market-card-actions">
+        <button type="button" data-pp-open-result>Abrir pagina</button>
+        <button type="button" data-pp-capture-result>Capturar evidencia</button>
+        <button type="button" class="pp-floating-secondary" data-pp-accept-result>Selecionar</button>
+        <button type="button" class="pp-floating-secondary" data-pp-ignore-result>Ignorar</button>
+      </div>
+      <p class="pp-market-muted" data-pp-result-status></p>
+    </article>
+  `).join("");
+}
+
+function attachMarketResultEvents(panel, item, results) {
+  panel.querySelectorAll("[data-pp-result-index]").forEach((card) => {
+    const index = Number(card.dataset.ppResultIndex);
+    const result = results[index];
+    card.querySelector("[data-pp-open-result]").addEventListener("click", () => {
+      sendRuntimeMessage({ type: "PP_MARKET_OPEN_URL", payload: { url: result.link } });
+    });
+    card.querySelector("[data-pp-capture-result]").addEventListener("click", () => captureMarketResult(panel, item, result, card));
+    card.querySelector("[data-pp-accept-result]").addEventListener("click", () => acceptMarketResult(panel, item, result, card, null));
+    card.querySelector("[data-pp-ignore-result]").addEventListener("click", () => {
+      card.style.display = "none";
+    });
+  });
+}
+
+async function captureMarketResult(panel, item, result, card) {
+  const status = card.querySelector("[data-pp-result-status]");
+  status.textContent = "Abrindo aba e capturando screenshot...";
+
+  const response = await sendRuntimeMessage({
+    type: "PP_MARKET_CAPTURE",
+    payload: { url: result.link }
+  });
+
+  if (!response.ok) {
+    status.textContent = response.message || "Falha na captura.";
+    return;
+  }
+
+  const screenshotId = await saveScreenshot(response.screenshotData);
+  await acceptMarketResult(panel, item, result, card, {
+    screenshotId,
+    capturadoEm: response.capturedAt
+  });
+  status.textContent = "Evidencia capturada e selecionada para relatorio.";
+}
+
+async function acceptMarketResult(panel, item, result, card, capture) {
+  const session = await getMarketSession();
+  const storedItem = session.items[item.itemKey] || item;
+  const quoteId = createQuoteId(result.link);
+  const quote = {
+    itemNumero: storedItem.numero,
+    titulo: result.title,
+    url: result.link,
+    dominio: result.displayLink,
+    snippet: result.snippet,
+    precoEditado: card.querySelector("[data-pp-price]").value.trim(),
+    fornecedorEditado: card.querySelector("[data-pp-supplier]").value.trim(),
+    observacao: card.querySelector("[data-pp-note]").value.trim(),
+    screenshotId: capture?.screenshotId || storedItem.cotacoes?.[quoteId]?.screenshotId || "",
+    capturadoEm: capture?.capturadoEm || storedItem.cotacoes?.[quoteId]?.capturadoEm || new Date().toISOString(),
+    status: "accepted"
+  };
+
+  storedItem.cotacoes = {
+    ...(storedItem.cotacoes || {}),
+    [quoteId]: quote
+  };
+  storedItem.status = Object.values(storedItem.cotacoes).filter((itemQuote) => itemQuote.status === "accepted").length >= 3
+    ? "relatorio"
+    : "em pesquisa";
+  session.items[item.itemKey] = storedItem;
+  await saveMarketSession(session);
+  await renderMarketItem(panel, storedItem);
+  await refreshMarketRowStatuses();
+}
+
+async function renderMarketSession(panel) {
+  const session = await getMarketSession();
+  const items = Object.values(session.items || {});
+  const results = panel.querySelector("[data-pp-market-results]");
+  const totalQuotes = items.reduce((sum, item) => {
+    return sum + Object.values(item.cotacoes || {}).filter((quote) => quote.status === "accepted").length;
+  }, 0);
+  const completeItems = items.filter((item) => {
+    return Object.values(item.cotacoes || {}).filter((quote) => quote.status === "accepted").length >= 3;
+  }).length;
+
+  panel.querySelector("[data-pp-status]").classList.remove("error");
+  panel.querySelector("[data-pp-status]").textContent = `Sessao aberta: ${items.length} itens, ${totalQuotes} cotacoes aceitas.`;
+  panel.querySelector("[data-pp-market-current]").innerHTML = `
+    <strong>Sessao ${escapeHtml(session.pesquisaId)}</strong>
+    <p class="pp-market-muted">Resumo local da pesquisa de mercado. Estes dados ficam no armazenamento local da extensao.</p>
+    <div class="pp-market-summary">
+      <div><strong>${items.length}</strong><span>itens</span></div>
+      <div><strong>${completeItems}</strong><span>com 3+ cotacoes</span></div>
+      <div><strong>${totalQuotes}</strong><span>cotacoes aceitas</span></div>
+    </div>
+    <div class="pp-market-card-actions">
+      <button type="button" class="pp-floating-secondary" data-pp-market-export>Exportar JSON</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-import>Importar JSON</button>
+      <button type="button" data-pp-market-report>Gerar relatorio</button>
+    </div>
+  `;
+  panel.querySelector("[data-pp-market-export]").addEventListener("click", exportMarketSession);
+  panel.querySelector("[data-pp-market-import]").addEventListener("click", importMarketSession);
+  panel.querySelector("[data-pp-market-report]").addEventListener("click", openMarketReport);
+  results.innerHTML = items.map((item) => {
+    const count = Object.values(item.cotacoes || {}).filter((quote) => quote.status === "accepted").length;
+    const lastResultsCount = item.lastResults?.length || 0;
+    return `
+      <article class="pp-market-session-item">
+        <h4>Item ${escapeHtml(item.numero)} - ${escapeHtml(item.descricao)}</h4>
+        <p>${escapeHtml(item.quantidade || "-")} ${escapeHtml(item.unidade || "")} | ${count}/3 cotacoes | ${lastResultsCount} resultados | ${escapeHtml(item.status || "pendente")}</p>
+        <p class="pp-market-muted">Termo: ${escapeHtml(item.termoBusca || "-")}</p>
+        <div class="pp-market-session-actions">
+          <button type="button" class="pp-floating-secondary" data-pp-open-session-item="${escapeAttribute(item.itemKey)}">Abrir item</button>
+        </div>
+      </article>
+    `;
+  }).join("") || `<div class="pp-market-muted">Nenhum item selecionado.</div>`;
+
+  results.querySelectorAll("[data-pp-open-session-item]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = (await getMarketSession()).items[button.dataset.ppOpenSessionItem];
+      if (item) {
+        await renderMarketItem(panel, item);
+      }
+    });
+  });
+}
+
+async function getMarketSession() {
+  const pesquisaId = detectPesquisaId();
+  const sessionId = `market-${pesquisaId}`;
+  const data = await chrome.storage.local.get({ marketSessions: {} });
+  const session = data.marketSessions[sessionId] || {
+    sessionId,
+    pesquisaId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    items: {}
+  };
+  return session;
+}
+
+async function saveMarketSession(session) {
+  session.updatedAt = new Date().toISOString();
+  const data = await chrome.storage.local.get({ marketSessions: {} });
+  data.marketSessions[session.sessionId] = session;
+  await chrome.storage.local.set({ marketSessions: data.marketSessions });
+}
+
+async function upsertMarketItem(item) {
+  const session = await getMarketSession();
+  session.items[item.itemKey] = {
+    ...item,
+    ...session.items[item.itemKey],
+    itemKey: item.itemKey,
+    numero: item.numero,
+    descricao: item.descricao,
+    quantidade: item.quantidade,
+    unidade: item.unidade,
+    media: item.media,
+    mediana: item.mediana,
+    termoBusca: session.items[item.itemKey]?.termoBusca || item.termoBusca
+  };
+  await saveMarketSession(session);
+  return session.items[item.itemKey];
+}
+
+function detectPesquisaId() {
+  const bodyText = cleanText(document.body.innerText || "");
+  const match = bodyText.match(/Numero da pesquisa\s+(\d+\s*\/\s*\d+)/i) ||
+    bodyText.match(/N[uú]mero da pesquisa\s+(\d+\s*\/\s*\d+)/i);
+  if (match) {
+    return match[1].replace(/\s/g, "");
+  }
+
+  const urlMatch = location.href.match(/(\d{4,})/);
+  return urlMatch ? urlMatch[1] : "pesquisa-local";
+}
+
+async function refreshMarketRowStatuses() {
+  const table = document.querySelector(".tabela-itens p-table, .tabela-itens table") || document.querySelector(".tabela-itens");
+  if (!table) {
+    return;
+  }
+  table.querySelectorAll("tbody.p-datatable-tbody tr, tbody tr").forEach(refreshMarketRowStatus);
+}
+
+async function refreshMarketRowStatus(row) {
+  const item = parseMarketItemRow(row);
+  if (!item) {
+    return;
+  }
+
+  const actionsCell = getMarketRowCells(row).at(-1);
+  let badge = actionsCell.querySelector(`.${MARKET_STATUS_CLASS}`);
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = MARKET_STATUS_CLASS;
+    actionsCell.append(badge);
+  }
+
+  const session = await getMarketSession();
+  const storedItem = session.items[item.itemKey];
+  const count = storedItem ? Object.values(storedItem.cotacoes || {}).filter((quote) => quote.status === "accepted").length : 0;
+  badge.textContent = storedItem ? `${count}/3` : "pendente";
+}
+
+function createQuoteId(url) {
+  return `quote-${hashString(url)}`;
+}
+
+function hashString(value) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash) + value.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+async function saveScreenshot(dataUrl) {
+  const id = `shot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const data = await chrome.storage.local.get({ marketScreenshots: {} });
+  data.marketScreenshots[id] = dataUrl;
+  await chrome.storage.local.set({ marketScreenshots: data.marketScreenshots });
+  return id;
+}
+
+async function exportMarketSession() {
+  const session = await getMarketSession();
+  const blob = new Blob([JSON.stringify(session, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${session.sessionId}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function importMarketSession() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json";
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    if (!file) {
+      return;
+    }
+    const session = JSON.parse(await file.text());
+    if (!session.sessionId || !session.items) {
+      throw new Error("Arquivo de sessao invalido.");
+    }
+    await saveMarketSession(session);
+    const panel = document.querySelector("#pp-compor-floating-panel");
+    if (panel) {
+      await renderMarketSession(panel);
+    }
+    await refreshMarketRowStatuses();
+  });
+  input.click();
+}
+
+async function openMarketReport() {
+  const session = await getMarketSession();
+  await saveMarketSession(session);
+  await sendRuntimeMessage({
+    type: "PP_MARKET_OPEN_REPORT",
+    payload: { sessionId: session.sessionId }
+  });
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, message: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(response || { ok: false, message: "Sem resposta da extensao." });
+    });
+  });
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value).replace(/`/g, "&#096;");
 }
 
 function findComporControl(cell) {

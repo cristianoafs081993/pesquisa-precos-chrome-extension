@@ -1,12 +1,31 @@
 {
   "manifest_version": 3,
   "name": "Pesquisa de Precos - Compor",
-  "description": "Desmarca a coluna Compor em pesquisas de precos quando o preco unitario atende a regra configurada.",
-  "version": "1.0.7",
+  "description": "Automatiza regras de composicao e pesquisa complementar de mercado em pesquisas de precos.",
+  "version": "2.5.0",
   "permissions": [
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "tabs",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://pesqpreco.estaleiro.serpro.gov.br/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
   ],
   "action": {
     "default_title": "Regra de Compor",

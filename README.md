@@ -1,44 +1,101 @@
-# Pesquisa de Precos - Compor
+# Pesquisa de Precos - Extensao Chrome
 
-Extensao Chrome Manifest V3 para desmarcar automaticamente a coluna **Compor** em uma pesquisa de precos do SERPRO, usando uma regra configuravel sobre a coluna **Preco unitario**.
+Extensao Chrome Manifest V3 para apoiar duas etapas da pesquisa de precos:
+
+- Etapa 1: automatizar regras sobre a coluna **Compor** e exclusoes justificadas dentro da tela de cotacoes.
+- Etapa 2: pesquisar mercado a partir da tela superior de **Itens**, capturar evidencias e gerar relatorio local.
+
+Para detalhes de arquitetura, contrato HTTP e pontos de manutencao, consulte `docs/ARCHITECTURE.md`.
 
 ## Como instalar
 
 1. Abra `chrome://extensions`.
 2. Ative **Modo do desenvolvedor**.
 3. Clique em **Carregar sem compactacao**.
-4. Selecione esta pasta:
-   `C:\Users\crist\OneDrive\Desktop\Obsidian\01 - Projetos\Apps\Pesquisa de preços`
+4. Selecione esta pasta do repositorio:
+   `C:\Users\crist\repos\pesquisa-precos-chrome-extension`
 
-## Como usar
+## Etapa 1 - Compor e exclusoes
 
-1. Acesse a pesquisa no Chrome, ja autenticado com o certificado digital.
-2. Abra a extensao **Pesquisa de Precos - Compor**.
-3. Configure os limites e o modo da regra.
-4. Clique em **Pre-visualizar** para destacar as linhas que seriam alteradas.
-5. Clique em **Aplicar** para desmarcar os switches **Compor** que estiverem marcados.
+1. Acesse a cotacao no Compras.gov.br, ja autenticado.
+2. Abra a extensao e clique em **Abrir painel flutuante**.
+3. Configure minimo, maximo e criterio.
+4. Use **Pre-visualizar**, **Desmarcar Compor**, **Desfazer** ou **Excluir abaixo/acima dos limites**.
 
-## Modos de regra
+## Etapa 2 - Pesquisa de mercado
 
-- **Desmarcar dentro da faixa**: com minimo `50` e maximo `100`, desmarca precos maiores que 50 e menores que 100.
-- **Desmarcar fora da faixa permitida**: com minimo `50` e maximo `100`, desmarca precos menores que 50 ou maiores que 100.
-- **Desmarcar acima do minimo**: usa somente o campo minimo.
-- **Desmarcar abaixo do maximo**: usa somente o campo maximo.
+1. Acesse a tela **Itens** da pesquisa de precos.
+2. A extensao adiciona automaticamente um botao **M** na coluna **Acoes** de cada item.
+3. Se o botao nao aparecer, recarregue a pagina depois de recarregar a extensao em `chrome://extensions`.
+4. Clique em **M** para abrir o item no painel e iniciar a busca automaticamente.
+5. Configure a URL do backend de busca e, se houver, o token, apenas se precisar trocar o padrao local.
+6. Use **Buscar mercado** para refazer a busca manualmente com outro termo.
+7. Em cada resultado, use:
+   - **Abrir pagina** para conferir manualmente.
+   - **Capturar evidencia** para abrir a pagina, tirar screenshot e selecionar para relatorio.
+   - **Selecionar** para aceitar o resultado sem screenshot.
+   - **Ignorar** para ocultar o resultado.
+8. Use **Ver sessao** para acompanhar itens selecionados.
+9. Use **Gerar relatorio** para abrir uma pagina imprimivel e salvar como PDF.
+10. Use **Exportar JSON** e **Importar JSON** para backup ou futura integracao com app web.
 
-Marque **Incluir valores iguais aos limites** se `50` e `100` tambem devem entrar na regra.
+## Servico local de busca e raspagem
+
+A extensao chama um backend configuravel no painel. No MVP, esse backend e um servico local Node.js com Playwright, sem Google Custom Search e sem Vertex AI Search.
+
+Servico incluido:
+
+`scraper-service/`
+
+Como rodar:
+
+```powershell
+cd "C:\Users\crist\repos\pesquisa-precos-chrome-extension\scraper-service"
+npm install
+npm run install-browsers
+npm start
+```
+
+Payload esperado:
+
+```json
+{
+  "query": "cadeira empilhavel branca com braco",
+  "itemId": "1-cadeira",
+  "pesquisaId": "15/2026"
+}
+```
+
+Resposta normalizada:
+
+```json
+{
+  "results": [
+    {
+      "title": "Produto",
+      "link": "https://exemplo.com/produto",
+      "displayLink": "exemplo.com",
+      "snippet": "Resumo do resultado",
+      "thumbnailLink": "https://...",
+      "price": "R$ 100,00",
+      "provider": "mercadolivre"
+    }
+  ]
+}
+```
+
+Endpoint padrao configurado na extensao:
+
+```text
+http://localhost:8787/search
+```
+
+Fornecedores iniciais ficam em `scraper-service/providers.js`. O caminho natural depois do MVP e empacotar esse servico em container e publicar no Google Cloud Run.
 
 ## Observacoes
 
-- A extensao nao faz login nem acessa o certificado digital. Ela roda dentro da aba que voce ja abriu e autenticou.
-- A extensao nao injeta codigo automaticamente ao carregar a pagina. Ela so atua quando voce clica em **Pre-visualizar** ou **Aplicar**.
-- A extensao procura as colunas pelos textos `Preco unitario` e `Compor`, por isso deve continuar funcionando mesmo se a ordem das colunas mudar.
-- Se a tabela usar paginacao ou carregamento sob demanda, aplique a regra novamente apos mudar de pagina ou rolar para carregar novas linhas.
-- Use primeiro a pre-visualizacao antes de aplicar em uma pesquisa real.
-- Se o console mostrar erro `401`, recarregue a pagina ou refaca o login antes de aplicar. Esse erro vem da sessao/token da aplicacao do SERPRO, nao da extensao.
-- A aplicacao pode registrar erros Angular internos quando a sessao expira ou alguma chamada do backend falha. A extensao agora clica um switch por vez, com intervalo, para evitar disparos rapidos demais.
-
-## Depois de alterar a extensao
-
-1. Abra `chrome://extensions`.
-2. Clique no botao de recarregar da extensao.
-3. Recarregue a pagina do SERPRO.
+- A extensao nao faz login nem acessa certificado digital.
+- A extensao so atua quando o operador abre o painel ou aciona um botao.
+- Screenshots sao armazenados localmente em `chrome.storage.local`; a extensao usa `unlimitedStorage` para evitar estourar a cota em pesquisas grandes.
+- O relatorio inicial e uma pagina HTML imprimivel via **Salvar como PDF**.
+- Para capturar screenshots, o Chrome precisa abrir a pagina em uma aba visivel por alguns segundos.

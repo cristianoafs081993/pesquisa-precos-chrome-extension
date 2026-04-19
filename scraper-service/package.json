@@ -1,0 +1,14 @@
+{
+  "name": "pesquisa-precos-scraper-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servico local de busca e raspagem de fornecedores para a extensao Pesquisa de Precos.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "install-browsers": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.43.0"
+  }
+}
