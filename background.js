@@ -134,12 +134,14 @@ async function captureEvidence(payload) {
       throw new Error("A captura nao corresponde a pagina da cotacao.");
     }
 
+    const freight = await captureFreightForTab(tab.id, capturedUrl, payload?.freightZip);
     const imageData = await captureTabWithDebugger(tab.id);
     return {
       screenshotData: imageData,
       capturedAt: new Date().toISOString(),
       requestedUrl: url,
       capturedUrl,
+      freight,
       openedTabId: tab.id
     };
   } catch (error) {
@@ -175,6 +177,280 @@ async function captureTabWithDebugger(tabId) {
       // Ignore detach failures.
     }
   }
+}
+
+async function captureFreightForTab(tabId, url, freightZip) {
+  const cep = normalizeFreightZip(freightZip);
+  if (!isAmazonUrl(url)) {
+    return { status: "pending", total: null, cep, text: "Fornecedor sem captura automatica de frete." };
+  }
+
+  if (!cep) {
+    return { status: "pending", total: null, cep: "", text: "CEP nao configurado." };
+  }
+
+  try {
+    const [execution] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: extractAmazonFreight,
+      args: [cep]
+    });
+    return normalizeFreightResult(execution?.result, cep);
+  } catch (error) {
+    if (isRecoverableFreightNavigationError(error)) {
+      try {
+        await waitForTabReady(tabId, 15000);
+        await delay(2500);
+        const [execution] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: extractAmazonFreight,
+          args: [cep]
+        });
+        return normalizeFreightResult(execution?.result, cep);
+      } catch (_retryError) {
+        // Fall through to the pending result below.
+      }
+    }
+
+    return {
+      status: "pending",
+      total: null,
+      cep,
+      text: error instanceof Error ? error.message : "Falha ao capturar frete."
+    };
+  }
+}
+
+function normalizeFreightResult(result, cep) {
+  if (result?.status === "free") {
+    return { status: "free", total: 0, cep, text: result.text || "Frete gratis" };
+  }
+
+  if (result?.status === "captured" && Number.isFinite(Number(result.total))) {
+    return { status: "captured", total: Number(result.total), cep, text: result.text || "" };
+  }
+
+  return {
+    status: "pending",
+    total: null,
+    cep,
+    text: result?.text || "Frete nao encontrado automaticamente."
+  };
+}
+
+async function extractAmazonFreight(cep) {
+  const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const zipDigits = String(cep || "").replace(/\D/g, "");
+  const formattedZip = zipDigits.length === 8 ? `${zipDigits.slice(0, 5)}-${zipDigits.slice(5)}` : zipDigits;
+  const normalizeText = (value) => String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const textOf = (element) => String(element?.innerText || element?.textContent || "").replace(/\s+/g, " ").trim();
+  const clickFirst = (selectors) => {
+    const element = selectors.map((selector) => document.querySelector(selector)).find(Boolean);
+    if (element) {
+      element.click();
+      return true;
+    }
+    return false;
+  };
+  const setInputValue = (input, value) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const parseCurrencyValue = (value) => {
+    const match = String(value || "").match(/R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})|R\$\s*\d+(?:,\d{2})/i);
+    if (!match) return null;
+    const number = Number(match[0].replace(/[^\d,]/g, "").replace(",", "."));
+    return Number.isFinite(number) ? number : null;
+  };
+  const parseFreightCurrency = (value) => {
+    const text = String(value || "");
+    const freightBeforePrice = text.match(/(?:frete|entrega|envio)[^R$]{0,80}(R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})|R\$\s*\d+(?:,\d{2}))/i);
+    if (freightBeforePrice) return parseCurrencyValue(freightBeforePrice[1]);
+    const priceBeforeFreight = text.match(/(R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})|R\$\s*\d+(?:,\d{2}))[^R$]{0,80}(?:frete|entrega|envio)/i);
+    if (priceBeforeFreight) return parseCurrencyValue(priceBeforeFreight[1]);
+    return null;
+  };
+  const pageZipMatches = () => {
+    if (zipDigits.length !== 8) return false;
+    const locationText = [
+      "#nav-global-location-popover-link",
+      "#contextualIngressPtLabel_deliveryShortLine",
+      "#glow-ingress-line1",
+      "#glow-ingress-line2"
+    ].map((selector) => textOf(document.querySelector(selector))).join(" ");
+    return locationText.replace(/\D/g, "").includes(zipDigits);
+  };
+  const fillCepInputs = () => {
+    if (zipDigits.length !== 8) return false;
+    const firstPart = document.querySelector("#GLUXZipUpdateInput_0");
+    const secondPart = document.querySelector("#GLUXZipUpdateInput_1");
+    if (firstPart && secondPart) {
+      setInputValue(firstPart, zipDigits.slice(0, 5));
+      setInputValue(secondPart, zipDigits.slice(5));
+      return true;
+    }
+
+    const singleInput = document.querySelector("#GLUXZipUpdateInput, input[name='zipCode'], input[autocomplete='postal-code']");
+    if (singleInput) {
+      setInputValue(singleInput, formattedZip || zipDigits);
+      return true;
+    }
+
+    return false;
+  };
+  const applyCepWithGlowApi = async () => {
+    if (zipDigits.length !== 8 || !/amazon\.com\.br$/i.test(window.location.hostname)) return false;
+    const csrfToken = document.querySelector(".GLUX_Popover meta[name='anti-csrftoken-a2z']")?.content ||
+      document.querySelector("meta[name='anti-csrftoken-a2z']")?.content ||
+      document.querySelector("#glowValidationToken")?.value ||
+      "";
+    try {
+      const response = await fetch("/portal-migration/hz/glow/address-change?actionSource=glow", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "accept": "text/html,*/*",
+          "anti-csrftoken-a2z": csrfToken,
+          "content-type": "application/json",
+          "x-requested-with": "XMLHttpRequest"
+        },
+        body: JSON.stringify({
+          locationType: "LOCATION_INPUT",
+          zipCode: formattedZip,
+          deviceType: "web",
+          storeContext: "home",
+          pageType: "Detail",
+          actionSource: "glow"
+        })
+      });
+      if (!response.ok) return false;
+      const text = await response.text();
+      if (!text) return true;
+      try {
+        const data = JSON.parse(text);
+        return data?.isAddressUpdated === 1 || data?.successful === 1 || data?.isValidAddress === 1;
+      } catch (_parseError) {
+        return true;
+      }
+    } catch (_error) {
+      return false;
+    }
+  };
+  const findFreightText = () => {
+    const prioritySelectors = [
+      "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
+      "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_LARGE",
+      "#deliveryBlockMessage",
+      "#deliveryBlock_feature_div",
+      "#contextualIngressPtLabel_deliveryShortLine",
+      "#rightCol",
+      "#buybox"
+    ];
+    const nodes = [
+      ...prioritySelectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))),
+      ...Array.from(document.querySelectorAll("span, div, p, li"))
+    ];
+    const seen = new Set();
+    const candidates = nodes
+      .map(textOf)
+      .filter(Boolean)
+      .filter((text) => {
+        const key = normalizeText(text).toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return /(frete|entrega|envio|gratis)/i.test(key) &&
+          !/prime video|ofertas exclusivas|aproveite|teste gratis|assinatura|audible/i.test(key);
+      })
+      .slice(0, 120)
+      .map((text) => ({ text, normalized: normalizeText(text).toLowerCase() }));
+    for (const candidate of candidates) {
+      if (/(?:frete|entrega|envio).{0,40}gratis|gratis.{0,40}(?:frete|entrega|envio)/i.test(candidate.normalized)) {
+        return { status: "free", total: 0, text: candidate.text };
+      }
+
+      if (/(frete|entrega|envio)/i.test(candidate.normalized)) {
+        const total = parseFreightCurrency(candidate.text);
+        if (total !== null) {
+          return { status: "captured", total, text: candidate.text };
+        }
+      }
+    }
+
+    return { status: "pending", total: null, text: candidates[0]?.text || "" };
+  };
+
+  if (pageZipMatches()) {
+    const alreadyRendered = findFreightText();
+    if (alreadyRendered.status !== "pending") {
+      return alreadyRendered;
+    }
+  }
+
+  clickFirst([
+    "#nav-global-location-popover-link",
+    "#contextualIngressPtLabel_deliveryShortLine",
+    "#glow-ingress-block",
+    "[data-action='GLUXAddressBlockAction']"
+  ]);
+  await sleep(1200);
+
+  if (fillCepInputs()) {
+    await sleep(200);
+    clickFirst([
+      "input[aria-labelledby='GLUXZipUpdate-announce']",
+      "#GLUXZipUpdate",
+      "span#GLUXZipUpdate input",
+      "button[name='glowDoneButton']"
+    ]);
+    await sleep(2500);
+    clickFirst([
+      "button[name='glowDoneButton']",
+      "#GLUXConfirmClose",
+      ".a-popover-footer button",
+      "input[data-action-type='SELECT_LOCATION']"
+    ]);
+    await sleep(1200);
+  } else {
+    await applyCepWithGlowApi();
+    await sleep(2500);
+  }
+
+  const captured = findFreightText();
+  if (captured.status !== "pending" && pageZipMatches()) {
+    return captured;
+  }
+
+  return {
+    status: "pending",
+    total: null,
+    text: pageZipMatches()
+      ? captured.text || "Frete nao encontrado no bloco de entrega da Amazon."
+      : `CEP ${formattedZip || zipDigits} nao foi aplicado pela Amazon antes da leitura do frete.`
+  };
+}
+
+async function waitForTabReady(tabId, timeoutMs) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab?.status === "complete") {
+      return;
+    }
+  } catch (_error) {
+    return;
+  }
+
+  await waitForTabLoaded(tabId, timeoutMs);
+}
+
+function isRecoverableFreightNavigationError(error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /execution context was destroyed|context invalidated|frame was removed|document unloaded|cannot access contents/i.test(message);
 }
 
 function waitForTabLoaded(tabId, timeoutMs) {
@@ -224,4 +500,14 @@ function isEvidenceUrlAllowed(requestedUrl, capturedUrl) {
 
 function normalizeHostname(value) {
   return safeHostname(value).replace(/^www\./i, "").toLowerCase();
+}
+
+function isAmazonUrl(value) {
+  const host = normalizeHostname(value);
+  return host === "amazon.com.br" || host.endsWith(".amazon.com.br");
+}
+
+function normalizeFreightZip(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits.length === 8 ? digits : "";
 }

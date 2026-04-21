@@ -47,7 +47,8 @@ function renderReport(session) {
 
 function renderItem(item) {
   const accepted = Object.values(item.cotacoes || {}).filter((quote) => quote.status === "accepted");
-  const prices = accepted.map((quote) => parseMoney(quote.precoEditado)).filter((value) => value !== null);
+  const completeQuotes = accepted.filter(hasCompleteFreight);
+  const prices = completeQuotes.map((quote) => Number(quote.precoUnitarioComFrete)).filter((value) => Number.isFinite(value));
   const min = prices.length ? Math.min(...prices) : null;
   const avg = prices.length ? prices.reduce((sum, value) => sum + value, 0) / prices.length : null;
   const quantity = parseMoney(item.quantidade);
@@ -60,6 +61,7 @@ function renderItem(item) {
         ${field("Quantidade", item.quantidade || "-")}
         ${field("Unidade", item.unidade || "-")}
         ${field("Cotações aceitas", String(accepted.length))}
+        ${field("Cotações com frete", String(completeQuotes.length))}
         ${field("Menor preço", formatMoney(min))}
         ${field("Média mercado", formatMoney(avg))}
         ${field("Total estimado", formatMoney(total))}
@@ -74,6 +76,11 @@ function renderQuote(quote, index) {
     <div class="quote">
       <h3>Cotação ${index + 1} - ${escapeHtml(quote.fornecedorEditado || quote.dominio || "")}</h3>
       <p><strong>Preço:</strong> ${escapeHtml(quote.precoEditado || "-")}</p>
+      <p><strong>Frete total:</strong> ${formatFreight(quote)}</p>
+      <p><strong>Frete unitário rateado:</strong> ${formatOptionalMoney(quote.freteUnitario)}</p>
+      <p><strong>Preço unitário com frete:</strong> ${formatOptionalMoney(quote.precoUnitarioComFrete)}</p>
+      <p><strong>Total da cotação:</strong> ${formatQuoteTotal(quote)}</p>
+      ${quote.quantidadeAviso ? `<p><strong>Aviso:</strong> ${escapeHtml(quote.quantidadeAviso)}</p>` : ""}
       <p><strong>Titulo:</strong> ${escapeHtml(quote.titulo || "-")}</p>
       <p class="url"><strong>URL:</strong> ${escapeHtml(quote.url || "-")}</p>
       <p><strong>Capturado em:</strong> ${formatDate(quote.capturadoEm)}</p>
@@ -81,6 +88,37 @@ function renderQuote(quote, index) {
       ${renderScreenshotEvidence(quote)}
     </div>
   `;
+}
+
+function hasCompleteFreight(quote) {
+  return ["captured", "free", "manual"].includes(quote?.freteStatus) &&
+    Number.isFinite(Number(quote.precoUnitarioComFrete));
+}
+
+function formatFreight(quote) {
+  if (quote?.freteStatus === "free") {
+    return "Frete grátis";
+  }
+
+  if (quote?.freteStatus === "captured") {
+    return `${formatOptionalMoney(quote.freteTotal)} (capturado automaticamente)`;
+  }
+
+  if (quote?.freteStatus === "manual") {
+    return `${formatOptionalMoney(quote.freteTotal)} (informado manualmente)`;
+  }
+
+  return "Pendente";
+}
+
+function formatQuoteTotal(quote) {
+  const unit = Number(quote?.precoUnitarioComFrete);
+  const quantity = Number(quote?.quantidadeConsiderada);
+  if (!Number.isFinite(unit) || !Number.isFinite(quantity)) {
+    return "-";
+  }
+
+  return formatMoney(unit * quantity);
 }
 
 function renderScreenshotEvidence(quote) {
@@ -164,6 +202,11 @@ function formatMoney(value) {
     style: "currency",
     currency: "BRL"
   }).format(value);
+}
+
+function formatOptionalMoney(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? formatMoney(number) : "-";
 }
 
 function parseMoney(value) {

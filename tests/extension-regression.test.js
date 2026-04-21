@@ -71,6 +71,8 @@ test("market results stay paginated and use clearer action labels", () => {
   assert.match(content, /data-pp-load-more-results/);
   assert.match(content, /Carregar mais resultados/);
   assert.match(content, /Usar no relatório/);
+  assert.match(content, /data-pp-freight-total/);
+  assert.match(content, /data-pp-effective-price/);
   assert.match(content, /data-pp-use-result/);
   assert.match(content, /captureAndAcceptMarketResult/);
   assert.match(content, /needsMarketResultRefresh/);
@@ -81,6 +83,20 @@ test("market results stay paginated and use clearer action labels", () => {
   assert.doesNotMatch(content, /data-pp-market-export>Exportar JSON/);
   assert.doesNotMatch(content, /data-pp-capture-result/);
   assert.doesNotMatch(content, /data-pp-accept-result/);
+});
+
+test("market quotes require freight and calculate unit price with apportioned freight", () => {
+  const content = read("content.js");
+  assert.match(content, /MARKET_FREIGHT_CONFIG_KEY/);
+  assert.match(content, /CEP para cálculo de frete/);
+  assert.match(content, /freightZip: freightConfig\.cep/);
+  assert.match(content, /function resolveFreightForQuote/);
+  assert.match(content, /function getQuantityInfo/);
+  assert.match(content, /freightTotal \/ quantityInfo\.quantity/);
+  assert.match(content, /priceValue \+ freightUnit/);
+  assert.match(content, /freteUnitario: freightUnit/);
+  assert.match(content, /precoUnitarioComFrete: effectiveUnitPrice/);
+  assert.match(content, /Frete não encontrado automaticamente/);
 });
 
 test("content script sends CATMAT context and stores enrichment signals", () => {
@@ -124,6 +140,16 @@ test("background capture keeps focus on the current tab while collecting evidenc
   assert.match(background, /requestedUrl: url/);
   assert.match(background, /capturedUrl/);
   assert.match(background, /pesqpreco\\\.estaleiro\\\.serpro\\\.gov\\\.br/);
+  assert.match(background, /captureFreightForTab/);
+  assert.match(background, /extractAmazonFreight/);
+  assert.match(background, /GLUXZipUpdateInput_0/);
+  assert.match(background, /GLUXZipUpdateInput_1/);
+  assert.match(background, /normalize\("NFD"\)/);
+  assert.match(background, /address-change\?actionSource=glow/);
+  assert.match(background, /pageZipMatches/);
+  assert.match(background, /isRecoverableFreightNavigationError/);
+  assert.match(background, /waitForTabReady/);
+  assert.match(background, /isAmazonUrl/);
 });
 
 test("background forwards item context to the scraper service", () => {
@@ -149,6 +175,10 @@ test("report keeps complete item descriptions and accented labels", () => {
   assert.match(report, /Pesquisa de Preços - Evidências de Mercado/);
   assert.match(report, /Cotações aceitas/);
   assert.match(report, /Menor preço/);
+  assert.match(report, /Cotações com frete/);
+  assert.match(report, /Frete unitário rateado/);
+  assert.match(report, /Preço unitário com frete/);
+  assert.match(report, /function hasCompleteFreight/);
   assert.match(css, /h2 \{[\s\S]*?white-space: normal/);
   assert.match(css, /h2 \{[\s\S]*?overflow-wrap: anywhere/);
 });

@@ -1,5 +1,5 @@
 (() => {
-const EXTENSION_SCRIPT_VERSION = "2.7.4";
+const EXTENSION_SCRIPT_VERSION = "2.8.0";
 
 if (window.__ppComporExtensionVersion === EXTENSION_SCRIPT_VERSION) {
   return;
@@ -19,6 +19,7 @@ const MARKET_STATUS_CLASS = "pp-market-row-status";
 const DEFAULT_MARKET_SEARCH_ENDPOINT = "http://localhost:8787/search";
 const MARKET_SOURCE_CONFIG_KEY = "marketSourceConfig";
 const MARKET_SOURCE_CONFIG_VERSION = 2;
+const MARKET_FREIGHT_CONFIG_KEY = "marketFreightConfig";
 const MARKET_PREFETCH_MAX_QUEUE = 8;
 const MARKET_PREFETCH_DISABLED_MS = 60000;
 const MARKET_RESULT_CACHE_VERSION = 4;
@@ -1708,6 +1709,8 @@ function renderMarketResults(item, results) {
       const quote = getAcceptedQuoteForResult(item, result);
       const isAccepted = Boolean(quote);
       const actionLabel = isAccepted ? "Já no relatório" : "Usar no relatório";
+      const freightStatus = getFreightStatusLabel(quote);
+      const effectivePrice = quote?.precoUnitarioComFrete ? formatMoneyValue(quote.precoUnitarioComFrete) : "";
 
       return `
     <article class="pp-market-card${isAccepted ? " pp-market-card-selected" : ""}" data-pp-result-index="${index}">
@@ -1719,7 +1722,12 @@ function renderMarketResults(item, results) {
         <input data-pp-price placeholder="Preço encontrado" value="${escapeAttribute(result.price || "")}">
         <input data-pp-supplier placeholder="Fornecedor" value="${escapeAttribute(result.displayLink || "")}">
       </div>
+      <div class="pp-market-edit-grid">
+        <input data-pp-freight-total placeholder="Frete total para a quantidade" value="${escapeAttribute(quote?.freteTotal !== undefined && quote?.freteTotal !== null ? formatMoneyValue(quote.freteTotal) : "")}">
+        <input data-pp-effective-price placeholder="Preço unitário com frete" value="${escapeAttribute(effectivePrice)}" readonly>
+      </div>
       <input data-pp-note placeholder="Observação/aderência do produto">
+      <p class="pp-market-muted" data-pp-freight-status>${escapeHtml(freightStatus)}</p>
       <div class="pp-market-card-actions">
         <button type="button" data-pp-open-result>Abrir pagina</button>
         <button type="button" class="pp-floating-secondary" data-pp-use-result ${isAccepted ? "disabled" : ""}>${actionLabel}</button>
@@ -1734,6 +1742,26 @@ function renderMarketResults(item, results) {
       ${hasMore ? `<button type="button" class="pp-floating-secondary" data-pp-load-more-results>Carregar mais resultados</button>` : ""}
     </div>
   `;
+}
+
+function getFreightStatusLabel(quote) {
+  if (!quote) {
+    return "Frete: tentativa automática pela Amazon; preencha manualmente se não for encontrado.";
+  }
+
+  if (quote.freteStatus === "free") {
+    return "Frete grátis considerado no relatório.";
+  }
+
+  if (quote.freteStatus === "captured") {
+    return `Frete capturado automaticamente: ${formatMoneyValue(quote.freteTotal)}.`;
+  }
+
+  if (quote.freteStatus === "manual") {
+    return `Frete informado manualmente: ${formatMoneyValue(quote.freteTotal)}.`;
+  }
+
+  return "Frete pendente.";
 }
 
 function filterRenderableMarketResults(results, itemOrQuery = "") {
@@ -1763,6 +1791,8 @@ function attachMarketResultEvents(panel, item, results) {
     card.querySelector("[data-pp-open-result]").addEventListener("click", () => {
       sendRuntimeMessage({ type: "PP_MARKET_OPEN_URL", payload: { url: result.link } });
     });
+    card.querySelector("[data-pp-price]")?.addEventListener("input", () => updateFreightPreview(card, item));
+    card.querySelector("[data-pp-freight-total]")?.addEventListener("input", () => updateFreightPreview(card, item));
     card.querySelector("[data-pp-use-result]")?.addEventListener("click", () => captureAndAcceptMarketResult(panel, item, result, card));
     card.querySelector("[data-pp-ignore-result]")?.addEventListener("click", () => {
       ignoreMarketResult(panel, item, result);
@@ -1772,6 +1802,20 @@ function attachMarketResultEvents(panel, item, results) {
     setMarketVisibleResultLimit(item.itemKey, getMarketVisibleResultLimit(item) + MARKET_RESULT_INCREMENT);
     await renderMarketItem(panel, item);
   });
+}
+
+function updateFreightPreview(card, item) {
+  const price = parseMoney(card.querySelector("[data-pp-price]")?.value);
+  const freight = parseMoney(card.querySelector("[data-pp-freight-total]")?.value);
+  const quantityInfo = getQuantityInfo(item);
+  const target = card.querySelector("[data-pp-effective-price]");
+
+  if (!target || price === null || freight === null) {
+    if (target) target.value = "";
+    return;
+  }
+
+  target.value = formatMoneyValue(price + (freight / quantityInfo.quantity));
 }
 
 function getMarketVisibleResultLimit(item) {
@@ -1880,6 +1924,20 @@ async function captureAndAcceptMarketResult(panel, item, result, card) {
   const status = card.querySelector("[data-pp-result-status]");
   const useButton = card.querySelector("[data-pp-use-result]");
   const ignoreButton = card.querySelector("[data-pp-ignore-result]");
+  const manualFreight = parseMoney(card.querySelector("[data-pp-freight-total]")?.value);
+  const freightConfig = await getMarketFreightConfig();
+
+  if (!freightConfig.cep && manualFreight === null) {
+    status.className = "pp-market-muted";
+    status.textContent = "Configure um CEP em Fontes ou informe manualmente o frete total para a quantidade do item.";
+    return;
+  }
+
+  if (manualFreight !== null && manualFreight < 0) {
+    status.className = "pp-market-muted";
+    status.textContent = "Informe um frete total maior ou igual a zero.";
+    return;
+  }
 
   status.className = "pp-market-muted";
   status.textContent = "Abrindo aba em segundo plano e capturando evidência...";
@@ -1889,7 +1947,10 @@ async function captureAndAcceptMarketResult(panel, item, result, card) {
   try {
     const response = await sendRuntimeMessage({
       type: "PP_MARKET_CAPTURE",
-      payload: { url: result.link }
+      payload: {
+        url: result.link,
+        freightZip: freightConfig.cep
+      }
     });
 
     if (!response.ok) {
@@ -1897,12 +1958,27 @@ async function captureAndAcceptMarketResult(panel, item, result, card) {
     }
 
     const screenshotId = await saveScreenshot(response.screenshotData);
+    const freight = resolveFreightForQuote({
+      capturedFreight: response.freight,
+      manualFreight,
+      freightZip: freightConfig.cep
+    });
+
+    if (freight.status === "pending") {
+      const detail = freight.mensagem ? ` (${freight.mensagem})` : "";
+      status.textContent = `Frete não encontrado automaticamente${detail}. Informe o frete total para a quantidade do item e tente novamente.`;
+      if (useButton) useButton.disabled = false;
+      if (ignoreButton) ignoreButton.disabled = false;
+      return;
+    }
+
     await acceptMarketResult(panel, item, result, card, {
       screenshotId,
       screenshotUrl: response.capturedUrl || result.link,
       screenshotRequestedUrl: response.requestedUrl || result.link,
       openedTabId: response.openedTabId || null,
-      capturadoEm: response.capturedAt
+      capturadoEm: response.capturedAt,
+      freight
     });
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : "Falha na captura.";
@@ -1911,10 +1987,56 @@ async function captureAndAcceptMarketResult(panel, item, result, card) {
   }
 }
 
+function resolveFreightForQuote({ capturedFreight, manualFreight, freightZip }) {
+  if (capturedFreight?.status === "free") {
+    return {
+      status: "free",
+      total: 0,
+      origem: "amazon-auto",
+      cep: capturedFreight.cep || freightZip || "",
+      mensagem: capturedFreight.text || "Frete grátis"
+    };
+  }
+
+  if (capturedFreight?.status === "captured" && Number.isFinite(Number(capturedFreight.total))) {
+    return {
+      status: "captured",
+      total: Number(capturedFreight.total),
+      origem: "amazon-auto",
+      cep: capturedFreight.cep || freightZip || "",
+      mensagem: capturedFreight.text || ""
+    };
+  }
+
+  if (manualFreight !== null && manualFreight >= 0) {
+    return {
+      status: "manual",
+      total: manualFreight,
+      origem: "manual",
+      cep: freightZip || "",
+      mensagem: capturedFreight?.text || ""
+    };
+  }
+
+  return {
+    status: "pending",
+    total: null,
+    origem: "",
+    cep: freightZip || "",
+    mensagem: capturedFreight?.text || ""
+  };
+}
+
 async function acceptMarketResult(panel, item, result, card, capture) {
   const session = await getMarketSession();
   const storedItem = session.items[item.itemKey] || item;
   const quoteId = createQuoteId(result.link);
+  const priceValue = parseMoney(card.querySelector("[data-pp-price]").value.trim());
+  const freight = capture?.freight || { status: "pending", total: null, origem: "", cep: "" };
+  const quantityInfo = getQuantityInfo(storedItem);
+  const freightTotal = Number.isFinite(Number(freight.total)) ? Number(freight.total) : null;
+  const freightUnit = freightTotal !== null ? freightTotal / quantityInfo.quantity : null;
+  const effectiveUnitPrice = priceValue !== null && freightUnit !== null ? priceValue + freightUnit : null;
   const quote = {
     itemNumero: storedItem.numero,
     titulo: result.title,
@@ -1922,8 +2044,18 @@ async function acceptMarketResult(panel, item, result, card, capture) {
     dominio: result.displayLink,
     snippet: result.snippet,
     precoEditado: card.querySelector("[data-pp-price]").value.trim(),
+    precoUnitario: priceValue,
     fornecedorEditado: card.querySelector("[data-pp-supplier]").value.trim(),
     observacao: card.querySelector("[data-pp-note]").value.trim(),
+    freteTotal: freightTotal,
+    freteStatus: freight.status,
+    freteOrigem: freight.origem,
+    freteCep: freight.cep,
+    freteMensagem: freight.mensagem || "",
+    quantidadeConsiderada: quantityInfo.quantity,
+    quantidadeAviso: quantityInfo.warning,
+    freteUnitario: freightUnit,
+    precoUnitarioComFrete: effectiveUnitPrice,
     screenshotId: capture?.screenshotId || storedItem.cotacoes?.[quoteId]?.screenshotId || "",
     screenshotUrl: capture?.screenshotUrl || storedItem.cotacoes?.[quoteId]?.screenshotUrl || "",
     screenshotRequestedUrl: capture?.screenshotRequestedUrl || storedItem.cotacoes?.[quoteId]?.screenshotRequestedUrl || result.link || "",
@@ -2009,6 +2141,7 @@ async function renderMarketSession(panel) {
 
 async function renderMarketSourcesConfig(panel) {
   const config = await getMarketSourceConfig();
+  const freightConfig = await getMarketFreightConfig();
   const current = panel.querySelector("[data-pp-market-current]");
   const results = panel.querySelector("[data-pp-market-results]");
   const enabledCount = config.sources.filter((source) => source.enabled).length;
@@ -2018,6 +2151,10 @@ async function renderMarketSourcesConfig(panel) {
   current.innerHTML = `
     <strong>Fontes de pesquisa</strong>
     <p class="pp-market-muted">Desmarque fontes padrao ou acrescente novas. Use <code>{query}</code> na URL da busca personalizada.</p>
+    <label>
+      <span>CEP para cálculo de frete</span>
+      <input data-pp-freight-zip inputmode="numeric" maxlength="9" placeholder="59000000" value="${escapeAttribute(freightConfig.cep || "")}">
+    </label>
     <div class="pp-market-card-actions">
       <button type="button" class="pp-floating-secondary" data-pp-market-back>Voltar ao item</button>
       <button type="button" data-pp-save-sources>Salvar fontes</button>
@@ -2065,6 +2202,14 @@ async function renderMarketSourcesConfig(panel) {
 
 async function saveMarketSourcesFromPanel(panel) {
   const config = await getMarketSourceConfig();
+  const status = panel.querySelector("[data-pp-status]");
+  const cep = normalizeFreightZip(panel.querySelector("[data-pp-freight-zip]")?.value || "");
+  if (panel.querySelector("[data-pp-freight-zip]")?.value.trim() && !cep) {
+    status.classList.add("error");
+    status.textContent = "Informe um CEP válido com 8 dígitos.";
+    return;
+  }
+
   const enabledById = new Map(Array.from(panel.querySelectorAll("[data-pp-source-id]")).map((row) => {
     return [row.dataset.ppSourceId, Boolean(row.querySelector("[data-pp-source-enabled]")?.checked)];
   }));
@@ -2073,6 +2218,7 @@ async function saveMarketSourcesFromPanel(panel) {
     enabled: enabledById.has(source.id) ? enabledById.get(source.id) : source.enabled
   }));
   await saveMarketSourceConfig(config);
+  await saveMarketFreightConfig({ cep });
   renderMarketSourcesConfig(panel);
 }
 
@@ -2197,6 +2343,27 @@ async function saveMarketSourceConfig(config) {
       version: MARKET_SOURCE_CONFIG_VERSION
     }
   });
+}
+
+async function getMarketFreightConfig() {
+  const data = await chrome.storage.sync.get({ [MARKET_FREIGHT_CONFIG_KEY]: null });
+  const saved = data[MARKET_FREIGHT_CONFIG_KEY] || {};
+  return {
+    cep: normalizeFreightZip(saved.cep || "")
+  };
+}
+
+async function saveMarketFreightConfig(config) {
+  await chrome.storage.sync.set({
+    [MARKET_FREIGHT_CONFIG_KEY]: {
+      cep: normalizeFreightZip(config?.cep || "")
+    }
+  });
+}
+
+function normalizeFreightZip(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits.length === 8 ? digits : "";
 }
 
 function queueMarketPrefetch(item) {
@@ -2459,6 +2626,18 @@ function stopMarketAutomation() {
 
 function createQuoteId(url) {
   return `quote-${hashString(url)}`;
+}
+
+function getQuantityInfo(item) {
+  const quantity = parseMoney(item?.quantidade);
+  if (quantity !== null && quantity > 0) {
+    return { quantity, warning: "" };
+  }
+
+  return {
+    quantity: 1,
+    warning: "Quantidade inválida ou ausente; cálculo de frete usou 1 unidade."
+  };
 }
 
 function hashString(value) {
@@ -2747,6 +2926,18 @@ function parseMoney(value) {
 
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatMoneyValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "";
+  }
+
+  return new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency: "BRL"
+  }).format(number);
 }
 
 function parseDecimal(value) {

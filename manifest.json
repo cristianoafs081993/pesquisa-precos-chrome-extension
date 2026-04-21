@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Pesquisa de Precos - Compor",
   "description": "Automatiza regras de composicao e pesquisa complementar de mercado em pesquisas de precos.",
-  "version": "2.7.4",
+  "version": "2.8.0",
   "permissions": [
     "activeTab",
     "debugger",
