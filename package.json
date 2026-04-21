@@ -1,0 +1,9 @@
+{
+  "name": "pesquisa-precos-chrome-extension",
+  "version": "2.7.4",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.js scraper-service/test/*.test.js",
+    "check": "node --check content.js && node --check background.js && node --check popup.js && node --check report.js && node --check scraper-service/server.js && node --check scraper-service/providers.js && node --check scraper-service/catalog.js"
+  }
+}

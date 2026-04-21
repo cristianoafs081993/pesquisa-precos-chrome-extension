@@ -1,5 +1,5 @@
 (() => {
-const EXTENSION_SCRIPT_VERSION = "2.5.0";
+const EXTENSION_SCRIPT_VERSION = "2.7.4";
 
 if (window.__ppComporExtensionVersion === EXTENSION_SCRIPT_VERSION) {
   return;
@@ -17,6 +17,25 @@ const MODAL_CLOSE_TIMEOUT_MS = 3000;
 const MARKET_BUTTON_CLASS = "pp-market-item-button";
 const MARKET_STATUS_CLASS = "pp-market-row-status";
 const DEFAULT_MARKET_SEARCH_ENDPOINT = "http://localhost:8787/search";
+const MARKET_SOURCE_CONFIG_KEY = "marketSourceConfig";
+const MARKET_SOURCE_CONFIG_VERSION = 2;
+const MARKET_PREFETCH_MAX_QUEUE = 8;
+const MARKET_PREFETCH_DISABLED_MS = 60000;
+const MARKET_RESULT_CACHE_VERSION = 4;
+const MARKET_INITIAL_RESULT_COUNT = 3;
+const MARKET_RESULT_INCREMENT = 3;
+const DEFAULT_MARKET_SOURCES = [
+  { id: "amazon", name: "Amazon Brasil", enabled: true, priority: 1, searchUrlTemplate: "https://www.amazon.com.br/s?k={query}" },
+  { id: "magalu", name: "Magazine Luiza", enabled: false, priority: 2, searchUrlTemplate: "https://www.magazineluiza.com.br/busca/{query}/" },
+  { id: "americanas", name: "Americanas", enabled: false, priority: 3, searchUrlTemplate: "https://www.americanas.com.br/busca/{query}" },
+  { id: "casasbahia", name: "Casas Bahia", enabled: false, priority: 4, searchUrlTemplate: "https://www.casasbahia.com.br/{query}/b" },
+  { id: "kabum", name: "KaBuM", enabled: false, priority: 5, searchUrlTemplate: "https://www.kabum.com.br/busca/{query}" },
+  { id: "dell", name: "Dell Brasil", enabled: false, priority: 6, searchUrlTemplate: "https://www.dell.com/pt-br/search/{query}" },
+  { id: "lenovo", name: "Lenovo Brasil", enabled: false, priority: 7, searchUrlTemplate: "https://www.lenovo.com/br/pt/search?text={query}" },
+  { id: "maisoffice", name: "MaisOFFICE", enabled: false, priority: 8, searchUrlTemplate: "https://www.maisoffice.com.br/busca?busca={query}" },
+  { id: "kalunga", name: "Kalunga", enabled: false, priority: 9, searchUrlTemplate: "https://www.kalunga.com.br/busca/{query}" },
+  { id: "fastshop", name: "Fast Shop", enabled: false, priority: 10, searchUrlTemplate: "https://www.fastshop.com.br/web/s/{query}" }
+];
 const DELETE_REASON_LOW = {
   option: "valor inexequivel",
   justification: "Preco abaixo do minimo configurado."
@@ -25,6 +44,8 @@ const DELETE_REASON_HIGH = {
   option: "valor excessivamente elevado",
   justification: "Preco acima do maximo configurado."
 };
+
+let extensionContextAlive = true;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "PP_RUN_COMPOR_RULE_V2" && message?.type !== "PP_UNDO_COMPOR_RULE_V2" && message?.type !== "PP_SHOW_FLOATING_PANEL_V2") {
@@ -785,9 +806,12 @@ function showFloatingPanel(initialSettings) {
   startMarketItemObserver();
 
   const existing = document.querySelector("#pp-compor-floating-panel");
-  if (existing) {
+  if (existing && !existing.querySelector("[data-pp-tab]")) {
+    existing.remove();
+  } else if (existing) {
     existing.style.display = "block";
     existing.querySelector("[data-pp-status]").textContent = "Painel pronto.";
+    selectFloatingTab(existing, initialSettings?.activeTab || "adjust");
     ensureMarketItemButtons();
     return;
   }
@@ -804,60 +828,62 @@ function showFloatingPanel(initialSettings) {
   panel.id = "pp-compor-floating-panel";
   panel.innerHTML = `
     <div class="pp-floating-header" data-pp-drag>
-      <strong>Pesquisa de Precos</strong>
+      <strong>Pesquisa de Preços</strong>
       <button type="button" data-pp-close aria-label="Fechar painel">x</button>
     </div>
     <div class="pp-floating-body">
-      <label>
-        <span>Criterio para desmarcar</span>
-        <select data-pp-mode>
-          <option value="between">Preco dentro da faixa</option>
-          <option value="outside">Preco fora da faixa</option>
-          <option value="above">Preco acima do minimo</option>
-          <option value="below">Preco abaixo do maximo</option>
-        </select>
-      </label>
-      <div class="pp-floating-grid">
-        <label>
-          <span>Minimo</span>
-          <input data-pp-min type="text" inputmode="decimal">
-        </label>
-        <label>
-          <span>Maximo</span>
-          <input data-pp-max type="text" inputmode="decimal">
-        </label>
+      <div class="pp-floating-tabs" role="tablist" aria-label="Recursos do painel">
+        <button type="button" role="tab" data-pp-tab="adjust" aria-selected="true">Ajustar pesquisa</button>
+        <button type="button" role="tab" data-pp-tab="market" aria-selected="false">Pesquisa de mercado</button>
       </div>
-      <label class="pp-floating-check">
-        <input data-pp-inclusive type="checkbox">
-        <span>Incluir iguais ao desmarcar</span>
-      </label>
-      <label class="pp-floating-check">
-        <input data-pp-scan-all type="checkbox">
-        <span>Processar linhas carregadas</span>
-      </label>
-      <div class="pp-floating-actions">
-        <button type="button" data-pp-action="preview">Pre-visualizar</button>
-        <button type="button" data-pp-action="apply">Desmarcar</button>
-      </div>
-      <button type="button" class="pp-floating-secondary" data-pp-action="undo">Desfazer desmarcar</button>
-      <button type="button" class="pp-floating-danger" data-pp-action="delete">Excluir abaixo/acima</button>
-      <div class="pp-floating-status" data-pp-status>Painel pronto.</div>
-      <section class="pp-market-section">
+      <section class="pp-floating-tab-panel" data-pp-tab-panel="adjust">
+        <label>
+          <span>Criterio para desmarcar</span>
+          <select data-pp-mode>
+            <option value="between">Preço dentro da faixa</option>
+            <option value="outside">Preço fora da faixa</option>
+            <option value="above">Preço acima do mínimo</option>
+            <option value="below">Preço abaixo do máximo</option>
+          </select>
+        </label>
+        <div class="pp-floating-grid">
+          <label>
+            <span>Minimo</span>
+            <input data-pp-min type="text" inputmode="decimal">
+          </label>
+          <label>
+            <span>Maximo</span>
+            <input data-pp-max type="text" inputmode="decimal">
+          </label>
+        </div>
+        <label class="pp-floating-check">
+          <input data-pp-inclusive type="checkbox">
+          <span>Incluir iguais ao desmarcar</span>
+        </label>
+        <label class="pp-floating-check">
+          <input data-pp-scan-all type="checkbox">
+          <span>Processar linhas carregadas</span>
+        </label>
+        <div class="pp-floating-actions">
+          <button type="button" data-pp-action="preview">Pre-visualizar</button>
+          <button type="button" data-pp-action="apply">Desmarcar</button>
+        </div>
+        <button type="button" class="pp-floating-secondary" data-pp-action="undo">Desfazer desmarcar</button>
+        <button type="button" class="pp-floating-danger" data-pp-action="delete">Excluir abaixo/acima</button>
+      </section>
+      <section class="pp-floating-tab-panel pp-market-section" data-pp-tab-panel="market" hidden>
         <div class="pp-market-heading">
           <strong>Pesquisa de mercado</strong>
-          <button type="button" class="pp-floating-secondary" data-pp-session>Ver sessao</button>
+          <div class="pp-market-heading-actions">
+            <button type="button" class="pp-floating-secondary" data-pp-sources>Fontes</button>
+            <button type="button" class="pp-floating-secondary" data-pp-session>Ver sessão</button>
+            <button type="button" class="pp-floating-secondary" data-pp-reset-session>Reiniciar sessão</button>
+          </div>
         </div>
-        <label>
-          <span>Backend de busca</span>
-          <input data-pp-search-endpoint type="url" placeholder="http://localhost:8787/search">
-        </label>
-        <label>
-          <span>Token do backend (opcional)</span>
-          <input data-pp-search-token type="password" placeholder="Bearer/API key">
-        </label>
-        <div class="pp-market-current" data-pp-market-current>Nenhum item selecionado. Use o botao de lupa na tabela de itens.</div>
+        <div class="pp-market-current" data-pp-market-current>Nenhum item selecionado. Use o botão de lupa na tabela de itens.</div>
         <div class="pp-market-results" data-pp-market-results></div>
       </section>
+      <div class="pp-floating-status" data-pp-status>Painel pronto.</div>
     </div>
   `;
 
@@ -876,16 +902,39 @@ function showFloatingPanel(initialSettings) {
   panel.querySelectorAll("[data-pp-action]").forEach((button) => {
     button.addEventListener("click", () => runFloatingAction(panel, button.dataset.ppAction));
   });
+  panel.querySelectorAll("[data-pp-tab]").forEach((button) => {
+    button.addEventListener("click", () => selectFloatingTab(panel, button.dataset.ppTab));
+  });
   panel.querySelector("[data-pp-session]").addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
     renderMarketSession(panel);
   });
-  panel.querySelector("[data-pp-search-endpoint]").addEventListener("change", () => saveMarketConfig(panel));
-  panel.querySelector("[data-pp-search-token]").addEventListener("change", () => saveMarketConfig(panel));
+  panel.querySelector("[data-pp-sources]").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    renderMarketSourcesConfig(panel);
+  });
+  panel.querySelector("[data-pp-reset-session]").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    resetMarketSession(panel);
+  });
 
+  selectFloatingTab(panel, initialSettings?.activeTab || "adjust");
   makeFloatingPanelDraggable(panel);
-  loadMarketConfig(panel);
+}
+
+function selectFloatingTab(panel, activeTab) {
+  const targetTab = activeTab === "market" ? "market" : "adjust";
+
+  panel.querySelectorAll("[data-pp-tab]").forEach((button) => {
+    button.setAttribute("aria-selected", button.dataset.ppTab === targetTab ? "true" : "false");
+  });
+
+  panel.querySelectorAll("[data-pp-tab-panel]").forEach((section) => {
+    section.hidden = section.dataset.ppTabPanel !== targetTab;
+  });
 }
 
 async function runFloatingAction(panel, action) {
@@ -1022,6 +1071,9 @@ function ensureFloatingPanelStyle() {
     #pp-compor-floating-panel * {
       box-sizing: border-box;
     }
+    #pp-compor-floating-panel [hidden] {
+      display: none !important;
+    }
     #pp-compor-floating-panel .pp-floating-header {
       display: flex;
       align-items: center;
@@ -1034,13 +1086,20 @@ function ensureFloatingPanelStyle() {
       user-select: none;
     }
     #pp-compor-floating-panel .pp-floating-header button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 28px;
       width: 28px;
       height: 28px;
+      box-sizing: border-box;
       border: 1px solid rgba(255, 255, 255, 0.6);
       border-radius: 999px;
+      padding: 0;
       background: transparent;
       color: #ffffff;
       cursor: pointer;
+      line-height: 1;
     }
     #pp-compor-floating-panel .pp-floating-body {
       display: grid;
@@ -1048,6 +1107,32 @@ function ensureFloatingPanelStyle() {
       padding: 12px;
       max-height: calc(100vh - 164px);
       overflow: auto;
+    }
+    #pp-compor-floating-panel .pp-floating-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 3px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      background: #f8fafc;
+    }
+    #pp-compor-floating-panel .pp-floating-tabs button {
+      padding: 8px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: #475569;
+      min-height: 36px;
+    }
+    #pp-compor-floating-panel .pp-floating-tabs button[aria-selected="true"] {
+      border-color: #165fbd;
+      background: #ffffff;
+      color: #123f73;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+    }
+    #pp-compor-floating-panel .pp-floating-tab-panel {
+      display: grid;
+      gap: 10px;
     }
     #pp-compor-floating-panel label {
       display: grid;
@@ -1090,6 +1175,10 @@ function ensureFloatingPanelStyle() {
       font: inherit;
       font-weight: 700;
     }
+    #pp-compor-floating-panel button:disabled {
+      cursor: default;
+      opacity: 0.72;
+    }
     #pp-compor-floating-panel .pp-floating-secondary {
       border: 1px solid #cbd5e1;
       background: #ffffff;
@@ -1111,15 +1200,16 @@ function ensureFloatingPanelStyle() {
     #pp-compor-floating-panel .pp-market-section {
       display: grid;
       gap: 10px;
-      margin-top: 8px;
-      padding-top: 10px;
-      border-top: 1px solid #cbd5e1;
     }
     #pp-compor-floating-panel .pp-market-heading {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
+    }
+    #pp-compor-floating-panel .pp-market-heading-actions {
+      display: flex;
+      gap: 6px;
     }
     #pp-compor-floating-panel .pp-market-heading button {
       padding: 6px 8px;
@@ -1136,8 +1226,6 @@ function ensureFloatingPanelStyle() {
     #pp-compor-floating-panel .pp-market-results {
       display: grid;
       gap: 8px;
-      max-height: 52vh;
-      overflow: auto;
     }
     #pp-compor-floating-panel .pp-market-card h4,
     #pp-compor-floating-panel .pp-market-session-item h4 {
@@ -1158,6 +1246,10 @@ function ensureFloatingPanelStyle() {
       border: 1px solid #d8dee8;
       float: left;
       margin-right: 8px;
+    }
+    #pp-compor-floating-panel .pp-market-card.pp-market-card-selected {
+      border-color: #93c5fd;
+      background: #eff6ff;
     }
     #pp-compor-floating-panel .pp-market-card-actions,
     #pp-compor-floating-panel .pp-market-edit-grid {
@@ -1202,6 +1294,28 @@ function ensureFloatingPanelStyle() {
       gap: 6px;
       margin-top: 8px;
     }
+    #pp-compor-floating-panel .pp-market-list-footer {
+      display: grid;
+      gap: 8px;
+    }
+    #pp-compor-floating-panel .pp-market-source-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 8px;
+      align-items: start;
+      border: 1px solid #d8dee8;
+      border-radius: 10px;
+      padding: 8px;
+      background: #f8fafc;
+    }
+    #pp-compor-floating-panel .pp-market-source-row input[type="checkbox"] {
+      width: auto;
+      margin-top: 3px;
+    }
+    #pp-compor-floating-panel .pp-market-source-row strong,
+    #pp-compor-floating-panel .pp-market-source-row span {
+      display: block;
+    }
     .${MARKET_BUTTON_CLASS} {
       margin-left: 4px !important;
       background: #0f766e !important;
@@ -1228,6 +1342,10 @@ function startMarketItemObserver() {
   }
 
   window.__ppMarketItemObserver = new MutationObserver(() => {
+    if (!extensionContextAlive) {
+      stopMarketAutomation();
+      return;
+    }
     window.clearTimeout(window.__ppMarketItemObserverTimer);
     window.__ppMarketItemObserverTimer = window.setTimeout(ensureMarketItemButtons, 250);
   });
@@ -1235,6 +1353,10 @@ function startMarketItemObserver() {
 }
 
 function ensureMarketItemButtons() {
+  if (!extensionContextAlive) {
+    return;
+  }
+
   const table = document.querySelector(".tabela-itens p-table, .tabela-itens table") || document.querySelector(".tabela-itens");
   if (!table) {
     return;
@@ -1244,12 +1366,14 @@ function ensureMarketItemButtons() {
     .filter((row) => getMarketRowCells(row).length >= 8);
 
   rows.forEach((row) => {
+    const item = parseMarketItemRow(row);
+
     if (row.querySelector(`.${MARKET_BUTTON_CLASS}`)) {
-      refreshMarketRowStatus(row);
+      refreshMarketRowStatus(row).catch(handleExtensionAsyncError);
+      queueMarketPrefetch(item);
       return;
     }
 
-    const item = parseMarketItemRow(row);
     if (!item) {
       return;
     }
@@ -1268,7 +1392,8 @@ function ensureMarketItemButtons() {
     });
 
     actionsCell.append(button);
-    refreshMarketRowStatus(row);
+    refreshMarketRowStatus(row).catch(handleExtensionAsyncError);
+    queueMarketPrefetch(item);
   });
 }
 
@@ -1282,9 +1407,7 @@ function parseMarketItemRow(row) {
     return null;
   }
 
-  const descriptionElement = cells[2]?.querySelector("[ng-reflect-tooltip], .text-overflow-descricao, span") || cells[2];
-  const descricao = cleanText(descriptionElement?.getAttribute?.("ng-reflect-tooltip")) ||
-    cleanText(descriptionElement?.textContent);
+  const descricao = getMarketItemDescription(cells[2]);
   const numero = cleanText(cells[1]?.textContent);
 
   if (!numero || !descricao) {
@@ -1295,12 +1418,18 @@ function parseMarketItemRow(row) {
     itemKey: createMarketItemKey(numero, descricao),
     numero,
     descricao,
+    originalDescription: descricao,
+    catalogCode: extractCatalogCodeFromDescription(descricao),
     quantidade: cleanText(cells[3]?.textContent),
     unidade: cleanText(cells[4]?.textContent),
     atualizadoEm: cleanText(cells[5]?.textContent),
     media: cleanText(cells[6]?.textContent),
     mediana: cleanText(cells[7]?.textContent),
     termoBusca: buildDefaultSearchTerm(descricao),
+    queryPrimary: "",
+    querySignals: {},
+    canonicalDescription: "",
+    catalogMatch: null,
     status: "pendente",
     cotacoes: {}
   };
@@ -1312,14 +1441,54 @@ function createMarketItemKey(numero, descricao) {
   return `${numero}-${normalizeText(descricao).slice(0, 80)}`;
 }
 
+function getMarketItemDescription(cell) {
+  if (!cell) {
+    return "";
+  }
+
+  const candidates = [];
+  const attributes = [
+    "ng-reflect-tooltip",
+    "title",
+    "aria-label",
+    "data-original-title",
+    "data-tooltip",
+    "tooltip"
+  ];
+  const elements = [cell, ...Array.from(cell.querySelectorAll("*"))];
+
+  elements.forEach((element) => {
+    attributes.forEach((attribute) => {
+      const value = element.getAttribute?.(attribute);
+      if (value) {
+        candidates.push(value);
+      }
+    });
+    candidates.push(element.innerText || element.textContent || "");
+  });
+
+  return candidates
+    .map(cleanText)
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)[0] || "";
+}
+
 function buildDefaultSearchTerm(descricao) {
-  return cleanText(descricao)
-    .replace(/^\d+\s*-\s*/, "")
+  return cleanText(stripLeadingCatalogCode(descricao))
     .replace(/\s*,\s*/g, " ")
     .replace(/\b(material|estrutura|cor|aplicacao|caracteristicas adicionais|altura|largura|profundidade)\s*:/gi, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 180);
+}
+
+function extractCatalogCodeFromDescription(descricao) {
+  const match = String(descricao || "").trim().match(/^(\d{5,7})(?:\s*[-–—:/]\s*|\s+)/);
+  return match ? match[1] : "";
+}
+
+function stripLeadingCatalogCode(descricao) {
+  return String(descricao || "").replace(/^\s*\d{5,7}(?:\s*[-–—:/]\s*|\s+)/, "");
 }
 
 function cleanText(value) {
@@ -1331,31 +1500,23 @@ async function openMarketItemPanel(item) {
     return;
   }
 
-  showFloatingPanel({});
+  showFloatingPanel({ activeTab: "market" });
   const panel = document.querySelector("#pp-compor-floating-panel");
   panel.style.display = "block";
+  selectFloatingTab(panel, "market");
   const storedItem = await upsertMarketItem(item);
   await renderMarketItem(panel, storedItem);
   await refreshMarketRowStatuses();
 
-  if (!storedItem.lastResults?.length) {
+  if (!storedItem.lastResults?.length || needsMarketResultRefresh(storedItem)) {
     await searchMarketForItem(panel, storedItem, { automatic: true });
   }
 }
 
-async function loadMarketConfig(panel) {
-  const config = await chrome.storage.sync.get({
+async function getMarketBackendConfig() {
+  return chrome.storage.sync.get({
     marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT,
     marketSearchToken: ""
-  });
-  panel.querySelector("[data-pp-search-endpoint]").value = config.marketSearchEndpoint || DEFAULT_MARKET_SEARCH_ENDPOINT;
-  panel.querySelector("[data-pp-search-token]").value = config.marketSearchToken || "";
-}
-
-async function saveMarketConfig(panel) {
-  await chrome.storage.sync.set({
-    marketSearchEndpoint: panel.querySelector("[data-pp-search-endpoint]").value.trim(),
-    marketSearchToken: panel.querySelector("[data-pp-search-token]").value.trim()
   });
 }
 
@@ -1365,47 +1526,77 @@ async function renderMarketItem(panel, item) {
   const acceptedCount = Object.values(storedItem.cotacoes || {}).filter((quote) => quote.status === "accepted").length;
   const current = panel.querySelector("[data-pp-market-current]");
   const results = panel.querySelector("[data-pp-market-results]");
+  const staleResults = needsMarketResultRefresh(storedItem);
+  panel.dataset.ppCurrentMarketItemKey = storedItem.itemKey;
 
   current.innerHTML = `
     <strong>Item ${escapeHtml(storedItem.numero)}</strong>
     <p>${escapeHtml(storedItem.descricao)}</p>
-    <p class="pp-market-muted">Quantidade: ${escapeHtml(storedItem.quantidade || "-")} ${escapeHtml(storedItem.unidade || "")} | Media: ${escapeHtml(storedItem.media || "-")} | Cotacoes aceitas: ${acceptedCount}/3</p>
+    <p class="pp-market-muted">Quantidade: ${escapeHtml(storedItem.quantidade || "-")} ${escapeHtml(storedItem.unidade || "")} | Média: ${escapeHtml(storedItem.media || "-")} | Cotações aceitas: ${acceptedCount}/3</p>
     <label>
       <span>Termo de busca</span>
-      <input data-pp-market-query type="text" value="${escapeHtml(storedItem.termoBusca || buildDefaultSearchTerm(storedItem.descricao))}">
+      <input data-pp-market-query type="text" value="${escapeHtml(storedItem.queryPrimary || storedItem.termoBusca || buildDefaultSearchTerm(storedItem.descricao))}">
     </label>
     <div class="pp-market-card-actions">
       <button type="button" data-pp-market-search>Buscar mercado</button>
-      <button type="button" class="pp-floating-secondary" data-pp-market-export>Exportar JSON</button>
-      <button type="button" class="pp-floating-secondary" data-pp-market-import>Importar JSON</button>
-      <button type="button" class="pp-floating-secondary" data-pp-market-report>Gerar relatorio</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-export>Exportar sessão</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-import>Importar sessão</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-report>Gerar relatório</button>
     </div>
   `;
 
-  if (storedItem.lastResults?.length) {
+  if (storedItem.lastResults?.length && !staleResults) {
     results.innerHTML = renderMarketResults(storedItem, storedItem.lastResults);
     attachMarketResultEvents(panel, storedItem, storedItem.lastResults);
+  } else if (staleResults) {
+    results.innerHTML = `<div class="pp-market-muted">Atualizando resultados salvos da sessão...</div>`;
   } else {
     results.innerHTML = renderAcceptedQuotes(storedItem);
   }
 
-  current.querySelector("[data-pp-market-search]").addEventListener("click", () => searchMarketForItem(panel, storedItem));
+  current.querySelector("[data-pp-market-search]").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    searchMarketForItem(panel, storedItem, { trigger: event.currentTarget });
+  });
   current.querySelector("[data-pp-market-export]").addEventListener("click", exportMarketSession);
   current.querySelector("[data-pp-market-import]").addEventListener("click", importMarketSession);
   current.querySelector("[data-pp-market-report]").addEventListener("click", openMarketReport);
 }
 
+async function renderCurrentMarketView(panel) {
+  const currentItemKey = panel.dataset.ppCurrentMarketItemKey;
+  if (currentItemKey) {
+    const session = await getMarketSession();
+    const item = session.items[currentItemKey];
+    if (item) {
+      await renderMarketItem(panel, item);
+      return;
+    }
+  }
+
+  renderMarketHome(panel);
+}
+
+function renderMarketHome(panel) {
+  delete panel.dataset.ppCurrentMarketItemKey;
+  panel.querySelector("[data-pp-status]").classList.remove("error");
+  panel.querySelector("[data-pp-status]").textContent = "Painel pronto.";
+  panel.querySelector("[data-pp-market-current]").innerHTML = "Nenhum item selecionado. Use o botão de lupa na tabela de itens.";
+  panel.querySelector("[data-pp-market-results]").innerHTML = "";
+}
+
 function renderAcceptedQuotes(item) {
   const quotes = Object.values(item.cotacoes || {}).filter((quote) => quote.status === "accepted");
   if (!quotes.length) {
-    return `<div class="pp-market-muted">Nenhuma cotacao aceita ainda.</div>`;
+    return `<div class="pp-market-muted">Nenhuma cotação aceita ainda.</div>`;
   }
 
   return quotes.map((quote) => `
     <article class="pp-market-card">
       <h4>${escapeHtml(quote.titulo)}</h4>
-      <p>${escapeHtml(quote.dominio)} | ${escapeHtml(quote.precoEditado || "preco nao informado")}</p>
-      <p class="pp-market-success">Selecionada para relatorio</p>
+      <p>${escapeHtml(quote.dominio)} | ${escapeHtml(quote.precoEditado || "preço não informado")}</p>
+      <p class="pp-market-success">Selecionada para relatório</p>
     </article>
   `).join("");
 }
@@ -1414,122 +1605,310 @@ async function searchMarketForItem(panel, item, options = {}) {
   const status = panel.querySelector("[data-pp-status]");
   const results = panel.querySelector("[data-pp-market-results]");
   const queryInput = panel.querySelector("[data-pp-market-query]");
-  const query = queryInput.value.trim();
+  const trigger = options.trigger;
+
+  if (trigger) {
+    trigger.disabled = true;
+  }
 
   status.classList.remove("error");
-  if (!query) {
-    status.classList.add("error");
-    status.textContent = "Informe um termo de busca para pesquisar mercado.";
-    return;
-  }
-
-  status.textContent = options.automatic
-    ? "Item selecionado. Buscando precos no servico local..."
-    : "Buscando precos no servico local...";
-  results.innerHTML = `<div class="pp-market-muted">Consultando fornecedores configurados. Mantenha o servico local em execucao.</div>`;
-  await saveMarketConfig(panel);
-
-  const config = await chrome.storage.sync.get({
-    marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT,
-    marketSearchToken: ""
-  });
-  const session = await getMarketSession();
-  session.items[item.itemKey] = {
-    ...session.items[item.itemKey],
-    termoBusca: query,
-    status: "em pesquisa"
-  };
-  await saveMarketSession(session);
-
-  // A busca roda no background script para evitar restricoes de CORS da pagina
-  // do Compras.gov.br e manter um contrato unico com o servico local.
-  const response = await sendRuntimeMessage({
-    type: "PP_MARKET_SEARCH",
-    payload: {
-      endpoint: config.marketSearchEndpoint || DEFAULT_MARKET_SEARCH_ENDPOINT,
-      token: config.marketSearchToken,
-      query,
-      itemId: item.itemKey,
-      pesquisaId: session.pesquisaId
+  try {
+    if (!queryInput) {
+      throw new Error("Não encontrei o campo de termo de busca. Reabra o item pelo botão M.");
     }
-  });
+    const query = queryInput.value.trim();
 
-  if (!response.ok) {
+    if (!query) {
+      throw new Error("Informe um termo de busca para pesquisar mercado.");
+    }
+
+    status.textContent = options.automatic
+      ? "Item selecionado. Buscando preços no serviço local..."
+      : "Buscando preços no serviço local...";
+    results.innerHTML = `<div class="pp-market-muted">Consultando fornecedores configurados. Mantenha o serviço local em execução.</div>`;
+    const config = await getMarketBackendConfig();
+    const sources = await getEnabledMarketSources();
+    if (!sources.length) {
+      throw new Error("Nenhuma fonte de pesquisa ativa. Abra Fontes e marque ao menos uma fonte.");
+    }
+
+    const session = await getMarketSession();
+    session.items[item.itemKey] = {
+      ...session.items[item.itemKey],
+      termoBusca: query,
+      status: "em pesquisa"
+    };
+    await saveMarketSession(session);
+
+    // A busca roda no background script para evitar restricoes de CORS da pagina
+    // do Compras.gov.br e manter um contrato unico com o servico local.
+    const response = await sendRuntimeMessage({
+      type: "PP_MARKET_SEARCH",
+      payload: {
+        endpoint: config.marketSearchEndpoint || DEFAULT_MARKET_SEARCH_ENDPOINT,
+        token: config.marketSearchToken,
+        query,
+        itemId: item.itemKey,
+        pesquisaId: session.pesquisaId,
+        providers: buildMarketProviderPayload(sources),
+        itemContext: {
+          numero: item.numero,
+          description: item.descricao,
+          originalDescription: item.originalDescription || item.descricao,
+          catalogCode: item.catalogCode || extractCatalogCodeFromDescription(item.descricao)
+        }
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(response.message || "Busca falhou.");
+    }
+
+    session.items[item.itemKey].lastResults = response.results || [];
+    session.items[item.itemKey].ignoredResults = {};
+    session.items[item.itemKey].resultCacheVersion = MARKET_RESULT_CACHE_VERSION;
+    session.items[item.itemKey].catalogMatch = response.enrichment?.catalogMatch || null;
+    session.items[item.itemKey].canonicalDescription = response.enrichment?.canonicalDescription || session.items[item.itemKey].descricao;
+    session.items[item.itemKey].queryPrimary = response.enrichment?.queryPrimary || query;
+    session.items[item.itemKey].querySignals = response.enrichment?.querySignals || {};
+    session.items[item.itemKey].termoBusca = response.enrichment?.queryPrimary || query;
+    await saveMarketSession(session);
+    setMarketVisibleResultLimit(item.itemKey, MARKET_INITIAL_RESULT_COUNT);
+    const storedItem = session.items[item.itemKey];
+    results.innerHTML = renderMarketResults(storedItem, storedItem.lastResults);
+    attachMarketResultEvents(panel, storedItem, storedItem.lastResults);
+    const validResultCount = filterRenderableMarketResults(storedItem.lastResults, storedItem).length;
+    status.textContent = validResultCount
+      ? `${validResultCount} produtos fiéis ao termo com preço retornados.`
+      : "0 produtos fiéis ao termo com preço retornados. Ajuste o termo ou habilite outra fonte em Fontes.";
+    await refreshMarketRowStatuses();
+  } catch (error) {
     status.classList.add("error");
-    status.textContent = response.message || "Busca falhou.";
-    return;
+    status.textContent = error instanceof Error ? error.message : "Busca falhou.";
+    results.innerHTML = `<div class="pp-market-muted">${escapeHtml(status.textContent)}</div>`;
+  } finally {
+    if (trigger) {
+      trigger.disabled = false;
+    }
   }
-
-  session.items[item.itemKey].lastResults = response.results || [];
-  await saveMarketSession(session);
-  results.innerHTML = renderMarketResults(item, response.results || []);
-  attachMarketResultEvents(panel, item, response.results || []);
-  status.textContent = `${response.results?.length || 0} resultados retornados.`;
-  await refreshMarketRowStatuses();
 }
 
 function renderMarketResults(item, results) {
-  if (!results.length) {
-    return `<div class="pp-market-muted">Nenhum resultado retornado.</div>`;
+  const validResults = filterRenderableMarketResults(results, item);
+  if (!validResults.length) {
+    return `<div class="pp-market-muted">Nenhum produto fiel ao termo de busca foi retornado pelas fontes ativas. Ajuste o termo ou habilite outra fonte em Fontes.</div>`;
   }
 
-  return results.map((result, index) => `
-    <article class="pp-market-card" data-pp-result-index="${index}">
+  const displayLimit = getMarketVisibleResultLimit(item);
+  const visibleResults = validResults.slice(0, displayLimit);
+  const hasMore = validResults.length > visibleResults.length;
+
+  return `
+    ${visibleResults.map((result, index) => {
+      const quote = getAcceptedQuoteForResult(item, result);
+      const isAccepted = Boolean(quote);
+      const actionLabel = isAccepted ? "Já no relatório" : "Usar no relatório";
+
+      return `
+    <article class="pp-market-card${isAccepted ? " pp-market-card-selected" : ""}" data-pp-result-index="${index}">
       ${result.thumbnailLink ? `<img alt="" src="${escapeAttribute(result.thumbnailLink)}">` : ""}
       <h4>${escapeHtml(result.title)}</h4>
       <p>${escapeHtml(result.displayLink)}</p>
       <p>${escapeHtml(result.snippet)}</p>
       <div class="pp-market-edit-grid">
-        <input data-pp-price placeholder="Preco encontrado" value="${escapeAttribute(result.price || "")}">
+        <input data-pp-price placeholder="Preço encontrado" value="${escapeAttribute(result.price || "")}">
         <input data-pp-supplier placeholder="Fornecedor" value="${escapeAttribute(result.displayLink || "")}">
       </div>
-      <input data-pp-note placeholder="Observacao/aderencia do produto">
+      <input data-pp-note placeholder="Observação/aderência do produto">
       <div class="pp-market-card-actions">
         <button type="button" data-pp-open-result>Abrir pagina</button>
-        <button type="button" data-pp-capture-result>Capturar evidencia</button>
-        <button type="button" class="pp-floating-secondary" data-pp-accept-result>Selecionar</button>
-        <button type="button" class="pp-floating-secondary" data-pp-ignore-result>Ignorar</button>
+        <button type="button" class="pp-floating-secondary" data-pp-use-result ${isAccepted ? "disabled" : ""}>${actionLabel}</button>
+        <button type="button" class="pp-floating-secondary" data-pp-ignore-result ${isAccepted ? "disabled" : ""}>Ignorar</button>
       </div>
-      <p class="pp-market-muted" data-pp-result-status></p>
+      <p class="${isAccepted ? "pp-market-success" : "pp-market-muted"}" data-pp-result-status>${isAccepted ? `Cotação já incluída no relatório${quote?.screenshotId ? " com evidência capturada" : ""}.` : ""}</p>
     </article>
-  `).join("");
+    `;
+    }).join("")}
+    <div class="pp-market-list-footer">
+      <span class="pp-market-muted">Mostrando ${visibleResults.length} de ${validResults.length} resultados fiéis ao termo.</span>
+      ${hasMore ? `<button type="button" class="pp-floating-secondary" data-pp-load-more-results>Carregar mais resultados</button>` : ""}
+    </div>
+  `;
+}
+
+function filterRenderableMarketResults(results, itemOrQuery = "") {
+  if (!Array.isArray(results)) return [];
+  const query = typeof itemOrQuery === "string"
+    ? itemOrQuery
+    : itemOrQuery?.queryPrimary || itemOrQuery?.termoBusca;
+  const ignoredResults = typeof itemOrQuery === "object" && itemOrQuery ? itemOrQuery.ignoredResults || {} : {};
+
+  return results.filter((result) => {
+    return result &&
+      result.status !== "error" &&
+      result.link &&
+      result.title &&
+      result.price &&
+      !ignoredResults[createQuoteId(result.link)] &&
+      isMarketResultRelevant(result, itemOrQuery);
+  }).sort((left, right) => scoreMarketResult(right, itemOrQuery) - scoreMarketResult(left, itemOrQuery));
 }
 
 function attachMarketResultEvents(panel, item, results) {
+  const validResults = filterRenderableMarketResults(results, item).slice(0, getMarketVisibleResultLimit(item));
   panel.querySelectorAll("[data-pp-result-index]").forEach((card) => {
     const index = Number(card.dataset.ppResultIndex);
-    const result = results[index];
+    const result = validResults[index];
+    if (!result) return;
     card.querySelector("[data-pp-open-result]").addEventListener("click", () => {
       sendRuntimeMessage({ type: "PP_MARKET_OPEN_URL", payload: { url: result.link } });
     });
-    card.querySelector("[data-pp-capture-result]").addEventListener("click", () => captureMarketResult(panel, item, result, card));
-    card.querySelector("[data-pp-accept-result]").addEventListener("click", () => acceptMarketResult(panel, item, result, card, null));
-    card.querySelector("[data-pp-ignore-result]").addEventListener("click", () => {
-      card.style.display = "none";
+    card.querySelector("[data-pp-use-result]")?.addEventListener("click", () => captureAndAcceptMarketResult(panel, item, result, card));
+    card.querySelector("[data-pp-ignore-result]")?.addEventListener("click", () => {
+      ignoreMarketResult(panel, item, result);
     });
+  });
+  panel.querySelector("[data-pp-load-more-results]")?.addEventListener("click", async () => {
+    setMarketVisibleResultLimit(item.itemKey, getMarketVisibleResultLimit(item) + MARKET_RESULT_INCREMENT);
+    await renderMarketItem(panel, item);
   });
 }
 
-async function captureMarketResult(panel, item, result, card) {
-  const status = card.querySelector("[data-pp-result-status]");
-  status.textContent = "Abrindo aba e capturando screenshot...";
+function getMarketVisibleResultLimit(item) {
+  window.__ppMarketVisibleResultLimits ||= {};
+  const itemKey = item?.itemKey || "default";
+  return window.__ppMarketVisibleResultLimits[itemKey] || MARKET_INITIAL_RESULT_COUNT;
+}
 
-  const response = await sendRuntimeMessage({
-    type: "PP_MARKET_CAPTURE",
-    payload: { url: result.link }
-  });
+function setMarketVisibleResultLimit(itemKey, limit) {
+  window.__ppMarketVisibleResultLimits ||= {};
+  window.__ppMarketVisibleResultLimits[itemKey || "default"] = Math.max(MARKET_INITIAL_RESULT_COUNT, limit);
+}
 
-  if (!response.ok) {
-    status.textContent = response.message || "Falha na captura.";
-    return;
+function needsMarketResultRefresh(item) {
+  return Boolean(item?.lastResults?.length) && item.resultCacheVersion !== MARKET_RESULT_CACHE_VERSION;
+}
+
+async function ignoreMarketResult(panel, item, result) {
+  const session = await getMarketSession();
+  const storedItem = session.items[item.itemKey] || item;
+  storedItem.ignoredResults = {
+    ...(storedItem.ignoredResults || {}),
+    [createQuoteId(result.link)]: new Date().toISOString()
+  };
+  session.items[item.itemKey] = storedItem;
+  await saveMarketSession(session);
+  await renderMarketItem(panel, storedItem);
+}
+
+function getAcceptedQuoteForResult(item, result) {
+  const quote = item?.cotacoes?.[createQuoteId(result.link)];
+  return quote?.status === "accepted" ? quote : null;
+}
+
+function isMarketResultRelevant(result, itemOrQuery) {
+  if (scoreMarketResult(result, itemOrQuery) <= 0) {
+    return false;
   }
 
-  const screenshotId = await saveScreenshot(response.screenshotData);
-  await acceptMarketResult(panel, item, result, card, {
-    screenshotId,
-    capturadoEm: response.capturedAt
-  });
-  status.textContent = "Evidencia capturada e selecionada para relatorio.";
+  const query = typeof itemOrQuery === "string"
+    ? itemOrQuery
+    : itemOrQuery?.queryPrimary || itemOrQuery?.termoBusca;
+  const tokens = getMarketSearchTokens(query);
+  if (!tokens.length && !itemOrQuery?.querySignals) {
+    return true;
+  }
+
+  return scoreMarketResult(result, itemOrQuery) >= Math.max(6, tokens.length * 3);
+}
+
+function getMarketSearchTokens(query) {
+  const stopWords = new Set([
+    "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e", "em", "na", "nas", "no", "nos", "o", "os", "ou", "para", "por"
+  ]);
+
+  return Array.from(new Set(normalizeText(query)
+    .split(/[^a-z0-9]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !stopWords.has(token))));
+}
+
+function singularizeToken(token) {
+  if (token.length <= 4 || !token.endsWith("s")) {
+    return token;
+  }
+
+  return token.slice(0, -1);
+}
+
+function scoreMarketResult(result, itemOrQuery) {
+  if (!result) {
+    return 0;
+  }
+
+  const item = typeof itemOrQuery === "object" && itemOrQuery ? itemOrQuery : {};
+  const query = typeof itemOrQuery === "string" ? itemOrQuery : item.queryPrimary || item.termoBusca || "";
+  const signals = item.querySignals || {};
+  const text = normalizeText([
+    result.title,
+    result.snippet,
+    result.displayLink,
+    result.providerName
+  ].join(" "));
+
+  const matchTokens = (value, weight) => {
+    return getMarketSearchTokens(value).reduce((sum, token) => {
+      return sum + (text.includes(token) ? weight : 0);
+    }, 0);
+  };
+
+  let score = 0;
+  score += matchTokens(query, 5);
+  score += matchTokens(signals.pdm, 6);
+  score += matchTokens(item.canonicalDescription, 3);
+  score += matchTokens(signals.classe, 2);
+  score += matchTokens(signals.grupo, 1);
+
+  if (signals.ncm && text.includes(String(signals.ncm))) {
+    score += 8;
+  }
+
+  return score;
+}
+
+async function captureAndAcceptMarketResult(panel, item, result, card) {
+  const status = card.querySelector("[data-pp-result-status]");
+  const useButton = card.querySelector("[data-pp-use-result]");
+  const ignoreButton = card.querySelector("[data-pp-ignore-result]");
+
+  status.className = "pp-market-muted";
+  status.textContent = "Abrindo aba em segundo plano e capturando evidência...";
+  if (useButton) useButton.disabled = true;
+  if (ignoreButton) ignoreButton.disabled = true;
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: "PP_MARKET_CAPTURE",
+      payload: { url: result.link }
+    });
+
+    if (!response.ok) {
+      throw new Error(response.message || "Falha na captura.");
+    }
+
+    const screenshotId = await saveScreenshot(response.screenshotData);
+    await acceptMarketResult(panel, item, result, card, {
+      screenshotId,
+      screenshotUrl: response.capturedUrl || result.link,
+      screenshotRequestedUrl: response.requestedUrl || result.link,
+      openedTabId: response.openedTabId || null,
+      capturadoEm: response.capturedAt
+    });
+  } catch (error) {
+    status.textContent = error instanceof Error ? error.message : "Falha na captura.";
+    if (useButton) useButton.disabled = false;
+    if (ignoreButton) ignoreButton.disabled = false;
+  }
 }
 
 async function acceptMarketResult(panel, item, result, card, capture) {
@@ -1546,6 +1925,9 @@ async function acceptMarketResult(panel, item, result, card, capture) {
     fornecedorEditado: card.querySelector("[data-pp-supplier]").value.trim(),
     observacao: card.querySelector("[data-pp-note]").value.trim(),
     screenshotId: capture?.screenshotId || storedItem.cotacoes?.[quoteId]?.screenshotId || "",
+    screenshotUrl: capture?.screenshotUrl || storedItem.cotacoes?.[quoteId]?.screenshotUrl || "",
+    screenshotRequestedUrl: capture?.screenshotRequestedUrl || storedItem.cotacoes?.[quoteId]?.screenshotRequestedUrl || result.link || "",
+    openedTabId: capture?.openedTabId || storedItem.cotacoes?.[quoteId]?.openedTabId || null,
     capturadoEm: capture?.capturadoEm || storedItem.cotacoes?.[quoteId]?.capturadoEm || new Date().toISOString(),
     status: "accepted"
   };
@@ -1575,9 +1957,9 @@ async function renderMarketSession(panel) {
   }).length;
 
   panel.querySelector("[data-pp-status]").classList.remove("error");
-  panel.querySelector("[data-pp-status]").textContent = `Sessao aberta: ${items.length} itens, ${totalQuotes} cotacoes aceitas.`;
+  panel.querySelector("[data-pp-status]").textContent = `Sessão aberta: ${items.length} itens, ${totalQuotes} cotações aceitas.`;
   panel.querySelector("[data-pp-market-current]").innerHTML = `
-    <strong>Sessao ${escapeHtml(session.pesquisaId)}</strong>
+    <strong>Sessão ${escapeHtml(session.pesquisaId)}</strong>
     <p class="pp-market-muted">Resumo local da pesquisa de mercado. Estes dados ficam no armazenamento local da extensao.</p>
     <div class="pp-market-summary">
       <div><strong>${items.length}</strong><span>itens</span></div>
@@ -1585,17 +1967,21 @@ async function renderMarketSession(panel) {
       <div><strong>${totalQuotes}</strong><span>cotacoes aceitas</span></div>
     </div>
     <div class="pp-market-card-actions">
-      <button type="button" class="pp-floating-secondary" data-pp-market-export>Exportar JSON</button>
-      <button type="button" class="pp-floating-secondary" data-pp-market-import>Importar JSON</button>
-      <button type="button" data-pp-market-report>Gerar relatorio</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-back>Voltar ao item</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-export>Exportar sessão</button>
+      <button type="button" class="pp-floating-secondary" data-pp-market-import>Importar sessão</button>
+      <button type="button" class="pp-floating-secondary" data-pp-reset-session-view>Reiniciar sessão</button>
+      <button type="button" data-pp-market-report>Gerar relatório</button>
     </div>
   `;
+  panel.querySelector("[data-pp-market-back]").addEventListener("click", () => renderCurrentMarketView(panel));
   panel.querySelector("[data-pp-market-export]").addEventListener("click", exportMarketSession);
   panel.querySelector("[data-pp-market-import]").addEventListener("click", importMarketSession);
+  panel.querySelector("[data-pp-reset-session-view]").addEventListener("click", () => resetMarketSession(panel));
   panel.querySelector("[data-pp-market-report]").addEventListener("click", openMarketReport);
   results.innerHTML = items.map((item) => {
     const count = Object.values(item.cotacoes || {}).filter((quote) => quote.status === "accepted").length;
-    const lastResultsCount = item.lastResults?.length || 0;
+    const lastResultsCount = filterRenderableMarketResults(item.lastResults || [], item).length;
     return `
       <article class="pp-market-session-item">
         <h4>Item ${escapeHtml(item.numero)} - ${escapeHtml(item.descricao)}</h4>
@@ -1613,12 +1999,334 @@ async function renderMarketSession(panel) {
       const item = (await getMarketSession()).items[button.dataset.ppOpenSessionItem];
       if (item) {
         await renderMarketItem(panel, item);
+        if (!item.lastResults?.length || needsMarketResultRefresh(item)) {
+          await searchMarketForItem(panel, item, { automatic: true });
+        }
       }
     });
   });
 }
 
+async function renderMarketSourcesConfig(panel) {
+  const config = await getMarketSourceConfig();
+  const current = panel.querySelector("[data-pp-market-current]");
+  const results = panel.querySelector("[data-pp-market-results]");
+  const enabledCount = config.sources.filter((source) => source.enabled).length;
+
+  panel.querySelector("[data-pp-status]").classList.remove("error");
+  panel.querySelector("[data-pp-status]").textContent = `${enabledCount} fontes ativas para pesquisa de mercado.`;
+  current.innerHTML = `
+    <strong>Fontes de pesquisa</strong>
+    <p class="pp-market-muted">Desmarque fontes padrao ou acrescente novas. Use <code>{query}</code> na URL da busca personalizada.</p>
+    <div class="pp-market-card-actions">
+      <button type="button" class="pp-floating-secondary" data-pp-market-back>Voltar ao item</button>
+      <button type="button" data-pp-save-sources>Salvar fontes</button>
+      <button type="button" class="pp-floating-secondary" data-pp-reset-sources>Restaurar padrao</button>
+    </div>
+  `;
+
+  results.innerHTML = `
+    ${config.sources.map((source) => `
+      <article class="pp-market-source-row" data-pp-source-id="${escapeAttribute(source.id)}">
+        <input type="checkbox" data-pp-source-enabled ${source.enabled ? "checked" : ""}>
+        <div>
+          <strong>${escapeHtml(source.priority ? `${source.priority}. ${source.name}` : source.name)}</strong>
+          <span class="pp-market-muted">${escapeHtml(source.searchUrlTemplate || "Fonte interna do scraper")}</span>
+          ${source.custom ? `<span class="pp-market-muted">Fonte personalizada</span>` : ""}
+        </div>
+        ${source.custom ? `<button type="button" class="pp-floating-secondary" data-pp-remove-source="${escapeAttribute(source.id)}">Remover</button>` : ""}
+      </article>
+    `).join("")}
+    <article class="pp-market-card">
+      <h4>Adicionar fonte personalizada</h4>
+      <label>
+        <span>Nome da fonte</span>
+        <input data-pp-new-source-name placeholder="Fornecedor regional">
+      </label>
+      <label>
+        <span>URL de busca</span>
+        <input data-pp-new-source-url placeholder="https://fornecedor.com.br/busca?q={query}">
+      </label>
+      <button type="button" data-pp-add-source>Adicionar fonte</button>
+    </article>
+  `;
+
+  current.querySelector("[data-pp-market-back]").addEventListener("click", () => renderCurrentMarketView(panel));
+  current.querySelector("[data-pp-save-sources]").addEventListener("click", () => saveMarketSourcesFromPanel(panel));
+  current.querySelector("[data-pp-reset-sources]").addEventListener("click", async () => {
+    await chrome.storage.sync.remove(MARKET_SOURCE_CONFIG_KEY);
+    renderMarketSourcesConfig(panel);
+  });
+  results.querySelector("[data-pp-add-source]").addEventListener("click", () => addCustomMarketSource(panel));
+  results.querySelectorAll("[data-pp-remove-source]").forEach((button) => {
+    button.addEventListener("click", () => removeCustomMarketSource(panel, button.dataset.ppRemoveSource));
+  });
+}
+
+async function saveMarketSourcesFromPanel(panel) {
+  const config = await getMarketSourceConfig();
+  const enabledById = new Map(Array.from(panel.querySelectorAll("[data-pp-source-id]")).map((row) => {
+    return [row.dataset.ppSourceId, Boolean(row.querySelector("[data-pp-source-enabled]")?.checked)];
+  }));
+  config.sources = config.sources.map((source) => ({
+    ...source,
+    enabled: enabledById.has(source.id) ? enabledById.get(source.id) : source.enabled
+  }));
+  await saveMarketSourceConfig(config);
+  renderMarketSourcesConfig(panel);
+}
+
+async function addCustomMarketSource(panel) {
+  const name = panel.querySelector("[data-pp-new-source-name]")?.value.trim();
+  const searchUrlTemplate = panel.querySelector("[data-pp-new-source-url]")?.value.trim();
+  const status = panel.querySelector("[data-pp-status]");
+
+  if (!name || !searchUrlTemplate || !searchUrlTemplate.includes("{query}")) {
+    status.classList.add("error");
+    status.textContent = "Informe nome e URL contendo {query}.";
+    return;
+  }
+
+  const config = await getMarketSourceConfig();
+  config.sources.push({
+    id: `custom-${hashString(`${name}-${searchUrlTemplate}`)}`,
+    name,
+    searchUrlTemplate,
+    enabled: true,
+    priority: config.sources.length + 1,
+    custom: true
+  });
+  await saveMarketSourceConfig(config);
+  renderMarketSourcesConfig(panel);
+}
+
+async function removeCustomMarketSource(panel, sourceId) {
+  const config = await getMarketSourceConfig();
+  config.sources = config.sources.filter((source) => source.id !== sourceId || !source.custom);
+  await saveMarketSourceConfig(config);
+  renderMarketSourcesConfig(panel);
+}
+
+async function resetMarketSession(panel) {
+  const confirmed = window.confirm("Reiniciar a sessão de pesquisa de mercado? Isso apaga itens, cotações aceitas, resultados e evidências salvas desta pesquisa.");
+  if (!confirmed) {
+    return;
+  }
+
+  const session = await getMarketSession();
+  const screenshotIds = Object.values(session.items || {}).flatMap((item) => {
+    return Object.values(item.cotacoes || {})
+      .map((quote) => quote.screenshotId)
+      .filter(Boolean);
+  });
+  const data = await chrome.storage.local.get({
+    marketSessions: {},
+    marketScreenshots: {}
+  });
+
+  delete data.marketSessions[session.sessionId];
+  screenshotIds.forEach((screenshotId) => {
+    delete data.marketScreenshots[screenshotId];
+  });
+
+  await chrome.storage.local.set({
+    marketSessions: data.marketSessions,
+    marketScreenshots: data.marketScreenshots
+  });
+
+  window.__ppMarketVisibleResultLimits = {};
+  renderMarketHome(panel);
+  await refreshMarketRowStatuses();
+}
+
+async function getEnabledMarketSources() {
+  const config = await getMarketSourceConfig();
+  return config.sources
+    .filter((source) => source.enabled)
+    .sort((left, right) => (left.priority || 999) - (right.priority || 999))
+    .map((source) => ({
+      id: source.id,
+      name: source.name,
+      searchUrlTemplate: source.searchUrlTemplate,
+      custom: Boolean(source.custom)
+    }));
+}
+
+function buildMarketProviderPayload(sources) {
+  return sources.map((source) => {
+    if (source.custom) {
+      return {
+        id: source.id,
+        name: source.name,
+        searchUrlTemplate: source.searchUrlTemplate,
+        custom: true
+      };
+    }
+
+    return source.id;
+  });
+}
+
+async function getMarketSourceConfig() {
+  const data = await chrome.storage.sync.get({ [MARKET_SOURCE_CONFIG_KEY]: null });
+  const saved = data[MARKET_SOURCE_CONFIG_KEY];
+  const savedSources = Array.isArray(saved?.sources) ? saved.sources : [];
+  const canReuseBuiltInConfig = saved?.version === MARKET_SOURCE_CONFIG_VERSION;
+  const savedById = canReuseBuiltInConfig
+    ? new Map(savedSources.map((source) => [source.id, source]))
+    : new Map();
+  const defaultSources = DEFAULT_MARKET_SOURCES.map((source) => ({
+    ...source,
+    enabled: savedById.has(source.id) ? savedById.get(source.id).enabled !== false : source.enabled
+  }));
+  const customSources = savedSources
+    .filter((source) => source.custom && source.name && source.searchUrlTemplate)
+    .map((source, index) => ({
+      ...source,
+      priority: source.priority || defaultSources.length + index + 1,
+      enabled: source.enabled !== false
+    }));
+
+  return { version: MARKET_SOURCE_CONFIG_VERSION, sources: [...defaultSources, ...customSources] };
+}
+
+async function saveMarketSourceConfig(config) {
+  await chrome.storage.sync.set({
+    [MARKET_SOURCE_CONFIG_KEY]: {
+      ...config,
+      version: MARKET_SOURCE_CONFIG_VERSION
+    }
+  });
+}
+
+function queueMarketPrefetch(item) {
+  if (!extensionContextAlive) {
+    return;
+  }
+
+  if (!item?.itemKey) {
+    return;
+  }
+
+  if (Date.now() < (window.__ppMarketPrefetchDisabledUntil || 0)) {
+    return;
+  }
+
+  window.__ppMarketPrefetchQueue ||= [];
+  window.__ppMarketPrefetchQueuedKeys ||= new Set();
+
+  if (window.__ppMarketPrefetchQueuedKeys.has(item.itemKey) || window.__ppMarketPrefetchQueue.length >= MARKET_PREFETCH_MAX_QUEUE) {
+    return;
+  }
+
+  window.__ppMarketPrefetchQueuedKeys.add(item.itemKey);
+  window.__ppMarketPrefetchQueue.push(item);
+  processMarketPrefetchQueue();
+}
+
+async function processMarketPrefetchQueue() {
+  if (!extensionContextAlive) {
+    return;
+  }
+
+  if (window.__ppMarketPrefetchRunning) {
+    return;
+  }
+
+  window.__ppMarketPrefetchRunning = true;
+  try {
+    while (window.__ppMarketPrefetchQueue?.length) {
+      if (!extensionContextAlive) {
+        return;
+      }
+      const item = window.__ppMarketPrefetchQueue.shift();
+      window.__ppMarketPrefetchQueuedKeys.delete(item.itemKey);
+      try {
+        await prefetchMarketItem(item);
+      } catch (error) {
+        handleExtensionAsyncError(error);
+      }
+      await sleep(350);
+    }
+  } finally {
+    window.__ppMarketPrefetchRunning = false;
+  }
+}
+
+async function prefetchMarketItem(item) {
+  if (!extensionContextAlive) {
+    return;
+  }
+
+  const session = await getMarketSession();
+  const storedItem = session.items[item.itemKey];
+  if (storedItem?.lastResults?.length) {
+    return;
+  }
+
+  const config = await getMarketBackendConfig();
+  const sources = await getEnabledMarketSources();
+  if (!sources.length) {
+    return;
+  }
+
+  session.items[item.itemKey] = {
+    ...item,
+    ...storedItem,
+    itemKey: item.itemKey,
+    numero: item.numero,
+    descricao: item.descricao,
+    termoBusca: storedItem?.termoBusca || item.termoBusca,
+    status: storedItem?.status || "pre-busca"
+  };
+  await saveMarketSession(session);
+
+  const response = await sendRuntimeMessage({
+    type: "PP_MARKET_SEARCH",
+    payload: {
+      endpoint: config.marketSearchEndpoint || DEFAULT_MARKET_SEARCH_ENDPOINT,
+      token: config.marketSearchToken,
+      query: session.items[item.itemKey].termoBusca,
+      itemId: item.itemKey,
+      pesquisaId: session.pesquisaId,
+      providers: buildMarketProviderPayload(sources),
+      itemContext: {
+        numero: item.numero,
+        description: item.descricao,
+        originalDescription: item.originalDescription || item.descricao,
+        catalogCode: item.catalogCode || extractCatalogCodeFromDescription(item.descricao)
+      },
+      prefetch: true
+    }
+  });
+
+  const latestSession = await getMarketSession();
+  const latestItem = latestSession.items[item.itemKey] || session.items[item.itemKey];
+  if (!response.ok) {
+    latestItem.prefetchError = response.message || "Pre-busca falhou.";
+    latestSession.items[item.itemKey] = latestItem;
+    await saveMarketSession(latestSession);
+    if (/servico local|failed to fetch|conectar/i.test(latestItem.prefetchError)) {
+      window.__ppMarketPrefetchDisabledUntil = Date.now() + MARKET_PREFETCH_DISABLED_MS;
+    }
+    return;
+  }
+
+  latestItem.lastResults = response.results || [];
+  latestItem.status = "pre-buscado";
+  latestItem.prefetchError = "";
+  latestItem.resultCacheVersion = MARKET_RESULT_CACHE_VERSION;
+  latestItem.catalogMatch = response.enrichment?.catalogMatch || latestItem.catalogMatch || null;
+  latestItem.canonicalDescription = response.enrichment?.canonicalDescription || latestItem.canonicalDescription || latestItem.descricao;
+  latestItem.queryPrimary = response.enrichment?.queryPrimary || latestItem.queryPrimary || latestItem.termoBusca;
+  latestItem.querySignals = response.enrichment?.querySignals || latestItem.querySignals || {};
+  latestSession.items[item.itemKey] = latestItem;
+  await saveMarketSession(latestSession);
+  await refreshMarketRowStatuses();
+}
+
 async function getMarketSession() {
+  assertExtensionContext();
   const pesquisaId = detectPesquisaId();
   const sessionId = `market-${pesquisaId}`;
   const data = await chrome.storage.local.get({ marketSessions: {} });
@@ -1633,6 +2341,7 @@ async function getMarketSession() {
 }
 
 async function saveMarketSession(session) {
+  assertExtensionContext();
   session.updatedAt = new Date().toISOString();
   const data = await chrome.storage.local.get({ marketSessions: {} });
   data.marketSessions[session.sessionId] = session;
@@ -1647,6 +2356,8 @@ async function upsertMarketItem(item) {
     itemKey: item.itemKey,
     numero: item.numero,
     descricao: item.descricao,
+    originalDescription: item.originalDescription || item.descricao,
+    catalogCode: item.catalogCode || extractCatalogCodeFromDescription(item.descricao),
     quantidade: item.quantidade,
     unidade: item.unidade,
     media: item.media,
@@ -1670,14 +2381,24 @@ function detectPesquisaId() {
 }
 
 async function refreshMarketRowStatuses() {
+  if (!extensionContextAlive) {
+    return;
+  }
+
   const table = document.querySelector(".tabela-itens p-table, .tabela-itens table") || document.querySelector(".tabela-itens");
   if (!table) {
     return;
   }
-  table.querySelectorAll("tbody.p-datatable-tbody tr, tbody tr").forEach(refreshMarketRowStatus);
+  table.querySelectorAll("tbody.p-datatable-tbody tr, tbody tr").forEach((row) => {
+    refreshMarketRowStatus(row).catch(handleExtensionAsyncError);
+  });
 }
 
 async function refreshMarketRowStatus(row) {
+  if (!extensionContextAlive) {
+    return;
+  }
+
   const item = parseMarketItemRow(row);
   if (!item) {
     return;
@@ -1694,7 +2415,46 @@ async function refreshMarketRowStatus(row) {
   const session = await getMarketSession();
   const storedItem = session.items[item.itemKey];
   const count = storedItem ? Object.values(storedItem.cotacoes || {}).filter((quote) => quote.status === "accepted").length : 0;
-  badge.textContent = storedItem ? `${count}/3` : "pendente";
+  const resultCount = storedItem ? filterRenderableMarketResults(storedItem.lastResults || [], storedItem).length : 0;
+  badge.textContent = storedItem
+    ? `${count}/3${resultCount ? ` • ${resultCount} res` : ""}`
+    : "pendente";
+}
+
+function assertExtensionContext() {
+  if (!extensionContextAlive || !chrome?.runtime?.id) {
+    markExtensionContextInvalidated();
+  }
+}
+
+function handleExtensionAsyncError(error) {
+  if (isExtensionContextInvalidatedError(error)) {
+    markExtensionContextInvalidated({ throwError: false });
+    return;
+  }
+
+  console.warn("[Pesquisa de Precos] Falha assíncrona no content script:", error);
+}
+
+function isExtensionContextInvalidatedError(error) {
+  return /extension context invalidated/i.test(error?.message || String(error || ""));
+}
+
+function markExtensionContextInvalidated(options = {}) {
+  extensionContextAlive = false;
+  stopMarketAutomation();
+  if (options.throwError !== false) {
+    throw new Error("Extension context invalidated");
+  }
+}
+
+function stopMarketAutomation() {
+  window.__ppMarketItemObserver?.disconnect?.();
+  window.__ppMarketItemObserver = null;
+  window.clearTimeout(window.__ppMarketItemObserverTimer);
+  window.__ppMarketPrefetchQueue = [];
+  window.__ppMarketPrefetchQueuedKeys?.clear?.();
+  window.__ppMarketPrefetchRunning = false;
 }
 
 function createQuoteId(url) {
@@ -1740,7 +2500,7 @@ function importMarketSession() {
     }
     const session = JSON.parse(await file.text());
     if (!session.sessionId || !session.items) {
-      throw new Error("Arquivo de sessao invalido.");
+      throw new Error("Arquivo de sessão inválido.");
     }
     await saveMarketSession(session);
     const panel = document.querySelector("#pp-compor-floating-panel");

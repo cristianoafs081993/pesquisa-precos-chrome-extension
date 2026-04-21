@@ -2,3 +2,5 @@ node_modules/
 scraper-service/node_modules/
 npm-debug.log*
 supabase/.temp/
+__pycache__/
+*.pyc

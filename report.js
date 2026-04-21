@@ -6,14 +6,14 @@ loadReport();
 
 async function loadReport() {
   if (!sessionId) {
-    report.textContent = "Sessao nao informada.";
+    report.textContent = "Sessão não informada.";
     return;
   }
 
   const { marketSessions = {} } = await chrome.storage.local.get({ marketSessions: {} });
   const session = marketSessions[sessionId];
   if (!session) {
-    report.textContent = "Sessao nao encontrada.";
+    report.textContent = "Sessão não encontrada.";
     return;
   }
 
@@ -31,14 +31,14 @@ function renderReport(session) {
       <button type="button" data-print>Salvar como PDF</button>
     </div>
     <article class="page">
-      <h1>Pesquisa de Precos - Evidencias de Mercado</h1>
+      <h1>Pesquisa de Preços - Evidências de Mercado</h1>
       <section class="meta">
-        ${field("Pesquisa", session.pesquisaId || "Nao identificada")}
+        ${field("Pesquisa", session.pesquisaId || "Não identificada")}
         ${field("Itens", String(items.length))}
-        ${field("Cotacoes aceitas", String(quotes.length))}
+        ${field("Cotações aceitas", String(quotes.length))}
         ${field("Gerado em", formatDate(new Date().toISOString()))}
-        ${field("Origem", "Extensao Chrome")}
-        ${field("Versao", "2.5.0")}
+        ${field("Origem", "Extensão Chrome")}
+        ${field("Versão", "2.7.4")}
       </section>
       ${items.map(renderItem).join("")}
     </article>
@@ -55,16 +55,16 @@ function renderItem(item) {
 
   return `
     <section>
-      <h2>Item ${escapeHtml(item.numero || "")} - ${escapeHtml(item.descricao || "")}</h2>
+      <h2>Item ${escapeHtml(item.numero || "")} - ${escapeHtml(getReportItemDescription(item))}</h2>
       <div class="summary">
         ${field("Quantidade", item.quantidade || "-")}
         ${field("Unidade", item.unidade || "-")}
-        ${field("Cotacoes aceitas", String(accepted.length))}
-        ${field("Menor preco", formatMoney(min))}
-        ${field("Media mercado", formatMoney(avg))}
+        ${field("Cotações aceitas", String(accepted.length))}
+        ${field("Menor preço", formatMoney(min))}
+        ${field("Média mercado", formatMoney(avg))}
         ${field("Total estimado", formatMoney(total))}
       </div>
-      ${accepted.map(renderQuote).join("") || "<p>Nenhuma cotacao aceita para este item.</p>"}
+      ${accepted.map(renderQuote).join("") || "<p>Nenhuma cotação aceita para este item.</p>"}
     </section>
   `;
 }
@@ -72,15 +72,55 @@ function renderItem(item) {
 function renderQuote(quote, index) {
   return `
     <div class="quote">
-      <h3>Cotacao ${index + 1} - ${escapeHtml(quote.fornecedorEditado || quote.dominio || "")}</h3>
-      <p><strong>Preco:</strong> ${escapeHtml(quote.precoEditado || "-")}</p>
+      <h3>Cotação ${index + 1} - ${escapeHtml(quote.fornecedorEditado || quote.dominio || "")}</h3>
+      <p><strong>Preço:</strong> ${escapeHtml(quote.precoEditado || "-")}</p>
       <p><strong>Titulo:</strong> ${escapeHtml(quote.titulo || "-")}</p>
       <p class="url"><strong>URL:</strong> ${escapeHtml(quote.url || "-")}</p>
       <p><strong>Capturado em:</strong> ${formatDate(quote.capturadoEm)}</p>
-      ${quote.observacao ? `<p><strong>Observacao:</strong> ${escapeHtml(quote.observacao)}</p>` : ""}
-      ${quote.screenshotId ? `<img alt="Screenshot da cotacao" data-screenshot-id="${escapeHtml(quote.screenshotId)}">` : "<p>Sem screenshot.</p>"}
+      ${quote.observacao ? `<p><strong>Observação:</strong> ${escapeHtml(quote.observacao)}</p>` : ""}
+      ${renderScreenshotEvidence(quote)}
     </div>
   `;
+}
+
+function renderScreenshotEvidence(quote) {
+  if (!quote.screenshotId) {
+    return "<p>Sem screenshot.</p>";
+  }
+
+  if (!isScreenshotEvidenceValid(quote)) {
+    return "<p>Screenshot não validado para esta cotação.</p>";
+  }
+
+  return `<img alt="Screenshot da cotação" data-screenshot-id="${escapeHtml(quote.screenshotId)}">`;
+}
+
+function getReportItemDescription(item) {
+  return [
+    item.descricao,
+    item.originalDescription,
+    item.canonicalDescription
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)[0] || "";
+}
+
+function isScreenshotEvidenceValid(quote) {
+  const quoteUrl = quote.url || quote.screenshotRequestedUrl || "";
+  const screenshotUrl = quote.screenshotUrl || "";
+  const quoteHost = normalizeHostname(quoteUrl);
+  const screenshotHost = normalizeHostname(screenshotUrl);
+
+  if (!quoteHost || !screenshotHost) {
+    return false;
+  }
+
+  if (/pesqpreco\.estaleiro\.serpro\.gov\.br$/i.test(screenshotHost)) {
+    return false;
+  }
+
+  return quoteHost === screenshotHost || quoteHost.endsWith(`.${screenshotHost}`) || screenshotHost.endsWith(`.${quoteHost}`);
 }
 
 async function hydrateScreenshots() {
@@ -95,7 +135,7 @@ async function hydrateScreenshots() {
     if (dataUrl) {
       image.src = dataUrl;
     } else {
-      image.replaceWith(document.createTextNode("Screenshot nao encontrado."));
+      image.replaceWith(document.createTextNode("Screenshot não encontrado."));
     }
   });
 }
@@ -139,6 +179,14 @@ function parseMoney(value) {
 
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeHostname(value) {
+  try {
+    return new URL(value).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch (_error) {
+    return "";
+  }
 }
 
 function escapeHtml(value) {

@@ -67,7 +67,10 @@ async function searchMarket(payload) {
       body: JSON.stringify({
         query,
         itemId: payload?.itemId || null,
-        pesquisaId: payload?.pesquisaId || null
+        pesquisaId: payload?.pesquisaId || null,
+        providers: Array.isArray(payload?.providers) ? payload.providers : [],
+        itemContext: payload?.itemContext || {},
+        prefetch: Boolean(payload?.prefetch)
       })
     });
   } catch (error) {
@@ -83,7 +86,11 @@ async function searchMarket(payload) {
   }
 
   const data = await response.json();
-  return { results: normalizeSearchResults(data) };
+  return {
+    results: normalizeSearchResults(data),
+    meta: data?.meta || {},
+    enrichment: data?.meta?.enrichment || null
+  };
 }
 
 function normalizeSearchResults(data) {
@@ -93,17 +100,19 @@ function normalizeSearchResults(data) {
       ? data.items
       : [];
 
-  return source.slice(0, 10).map((item) => ({
+  return source.map((item) => ({
     title: item.title || item.htmlTitle || "Resultado sem titulo",
     link: item.link || item.url || "",
     displayLink: item.displayLink || safeHostname(item.link || item.url || ""),
     snippet: item.snippet || item.htmlSnippet || "",
     price: item.price || item.priceText || "",
+    provider: item.provider || "",
+    providerName: item.providerName || "",
     thumbnailLink: item.thumbnailLink ||
       item.image?.thumbnailLink ||
       item.image?.src ||
       ""
-  })).filter((item) => item.link);
+  })).filter((item) => item.link && item.title && item.price);
 }
 
 async function captureEvidence(payload) {
@@ -112,18 +121,26 @@ async function captureEvidence(payload) {
     throw new Error("URL invalida para captura.");
   }
 
-  // O Chrome captura com confiabilidade apenas abas visiveis. No MVP a aba e
-  // aberta, aguardada por alguns segundos, fotografada e fechada em seguida.
-  const tab = await chrome.tabs.create({ url, active: true });
+  // A captura usa o protocolo de depuracao para evitar roubar o foco da aba
+  // atual. A aba de evidencia e aberta em background e permanece disponivel.
+  const tab = await chrome.tabs.create({ url, active: false });
 
   try {
     await waitForTabLoaded(tab.id, 12000);
     await delay(1800);
-    const imageData = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    await chrome.tabs.remove(tab.id);
+    const finalTab = await chrome.tabs.get(tab.id).catch(() => tab);
+    const capturedUrl = finalTab?.url || url;
+    if (!isEvidenceUrlAllowed(url, capturedUrl)) {
+      throw new Error("A captura nao corresponde a pagina da cotacao.");
+    }
+
+    const imageData = await captureTabWithDebugger(tab.id);
     return {
       screenshotData: imageData,
-      capturedAt: new Date().toISOString()
+      capturedAt: new Date().toISOString(),
+      requestedUrl: url,
+      capturedUrl,
+      openedTabId: tab.id
     };
   } catch (error) {
     try {
@@ -132,6 +149,31 @@ async function captureEvidence(payload) {
       // Ignore tab cleanup failures.
     }
     throw error;
+  }
+}
+
+async function captureTabWithDebugger(tabId) {
+  const target = { tabId };
+
+  await chrome.debugger.attach(target, "1.3");
+  try {
+    await chrome.debugger.sendCommand(target, "Page.enable");
+    const capture = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true
+    });
+
+    if (!capture?.data) {
+      throw new Error("Falha ao gerar screenshot da evidencia.");
+    }
+
+    return `data:image/png;base64,${capture.data}`;
+  } finally {
+    try {
+      await chrome.debugger.detach(target);
+    } catch (_detachError) {
+      // Ignore detach failures.
+    }
   }
 }
 
@@ -164,4 +206,22 @@ function safeHostname(value) {
   } catch (_error) {
     return "";
   }
+}
+
+function isEvidenceUrlAllowed(requestedUrl, capturedUrl) {
+  const requestedHost = normalizeHostname(requestedUrl);
+  const capturedHost = normalizeHostname(capturedUrl);
+  if (!requestedHost || !capturedHost) {
+    return false;
+  }
+
+  if (/pesqpreco\.estaleiro\.serpro\.gov\.br$/i.test(capturedHost)) {
+    return false;
+  }
+
+  return requestedHost === capturedHost || requestedHost.endsWith(`.${capturedHost}`) || capturedHost.endsWith(`.${requestedHost}`);
+}
+
+function normalizeHostname(value) {
+  return safeHostname(value).replace(/^www\./i, "").toLowerCase();
 }

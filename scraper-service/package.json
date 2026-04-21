@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "install-browsers": "npx playwright install chromium"
+    "install-browsers": "npx playwright install chromium",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "playwright": "^1.43.0"
