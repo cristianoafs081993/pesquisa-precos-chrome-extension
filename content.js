@@ -16,7 +16,7 @@ const MODAL_TIMEOUT_MS = 7000;
 const MODAL_CLOSE_TIMEOUT_MS = 3000;
 const MARKET_BUTTON_CLASS = "pp-market-item-button";
 const MARKET_STATUS_CLASS = "pp-market-row-status";
-const DEFAULT_MARKET_SEARCH_ENDPOINT = "http://localhost:8787/search";
+const DEFAULT_MARKET_SEARCH_ENDPOINT = "http://10.50.6.5:8787/search";
 const MARKET_SOURCE_CONFIG_KEY = "marketSourceConfig";
 const MARKET_SOURCE_CONFIG_VERSION = 2;
 const MARKET_FREIGHT_CONFIG_KEY = "marketFreightConfig";
@@ -1515,10 +1515,15 @@ async function openMarketItemPanel(item) {
 }
 
 async function getMarketBackendConfig() {
-  return chrome.storage.sync.get({
+  const config = await chrome.storage.sync.get({
     marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT,
     marketSearchToken: ""
   });
+  if (config.marketSearchEndpoint === "http://localhost:8787/search") {
+    config.marketSearchEndpoint = DEFAULT_MARKET_SEARCH_ENDPOINT;
+    await chrome.storage.sync.set({ marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT });
+  }
+  return config;
 }
 
 async function renderMarketItem(panel, item) {
