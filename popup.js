@@ -1,24 +1,25 @@
 const DEFAULTS = {
-  mode: "between",
+  mode: "outside",
   minPrice: "50",
   maxPrice: "100",
-  inclusive: false,
-  scanAllPages: true
+  autoRange: true
 };
 
 const fields = {
-  mode: document.querySelector("#mode"),
+  autoRange: document.querySelector("#autoRange"),
   minPrice: document.querySelector("#minPrice"),
   maxPrice: document.querySelector("#maxPrice"),
-  inclusive: document.querySelector("#inclusive"),
-  scanAllPages: document.querySelector("#scanAllPages"),
   floatingPanel: document.querySelector("#floatingPanel"),
   preview: document.querySelector("#preview"),
   apply: document.querySelector("#apply"),
   delete: document.querySelector("#delete"),
   undo: document.querySelector("#undo"),
+  rangeSummary: document.querySelector("#rangeSummary"),
   status: document.querySelector("#status")
 };
+
+const sourceTabId = Number(new URLSearchParams(window.location.search).get("sourceTabId"));
+let lastRangeRefresh = 0;
 
 loadSettings();
 fields.preview.addEventListener("click", () => run("preview"));
@@ -26,14 +27,19 @@ fields.apply.addEventListener("click", () => run("apply"));
 fields.delete.addEventListener("click", () => run("delete"));
 fields.undo.addEventListener("click", undoLastRun);
 fields.floatingPanel.addEventListener("click", showFloatingPanel);
+fields.autoRange.addEventListener("change", updateRangeMode);
+window.setInterval(() => {
+  if (fields.autoRange.checked) {
+    refreshCalculatedRange(false);
+  }
+}, 1500);
 
 async function loadSettings() {
-  const settings = await chrome.storage.sync.get(DEFAULTS);
-  fields.mode.value = settings.mode;
+  const settings = await storageGet("sync", DEFAULTS);
+  fields.autoRange.checked = settings.autoRange !== false;
   fields.minPrice.value = settings.minPrice;
   fields.maxPrice.value = settings.maxPrice;
-  fields.inclusive.checked = settings.inclusive;
-  fields.scanAllPages.checked = settings.scanAllPages;
+  updateRangeMode();
 }
 
 async function undoLastRun() {
@@ -80,7 +86,7 @@ async function showFloatingPanel() {
   setStatus("Abrindo painel flutuante...");
 
   const settings = readSettings();
-  await chrome.storage.sync.set(settings);
+  await storageSet("sync", settings);
 
   const tab = await getActiveSerproTab();
   if (!tab) {
@@ -113,6 +119,9 @@ async function run(action) {
   };
   setStatus(statusByAction[action] || "Executando...");
 
+  if (fields.autoRange.checked) {
+    await refreshCalculatedRange(true);
+  }
   const settings = readSettings();
   const validation = validate(settings, action);
   if (validation) {
@@ -120,7 +129,7 @@ async function run(action) {
     return;
   }
 
-  await chrome.storage.sync.set(settings);
+  await storageSet("sync", settings);
 
   const tab = await getActiveSerproTab();
   if (!tab) {
@@ -178,19 +187,91 @@ async function run(action) {
   });
 }
 
+async function refreshCalculatedRange(showErrors) {
+  if (!fields.autoRange.checked) {
+    return;
+  }
+
+  if (!showErrors && Date.now() - lastRangeRefresh < 1000) {
+    return;
+  }
+  lastRangeRefresh = Date.now();
+
+  try {
+    const tab = await getActiveSerproTab();
+    if (!tab) {
+      return;
+    }
+
+    await ensureContentScript(tab.id);
+    const response = await sendContentMessage(tab.id, { type: "PP_GET_COMPOR_RANGE_V2" });
+    if (!response?.ok || !response.range) {
+      throw new Error(response?.message || "Nao foi possivel calcular a faixa.");
+    }
+
+    renderCalculatedRange(response.range);
+  } catch (error) {
+    fields.minPrice.value = "";
+    fields.maxPrice.value = "";
+    fields.rangeSummary.textContent = "Nao consegui ler a media/mediana selecionada na pagina.";
+    if (showErrors) {
+      setStatus(error instanceof Error ? error.message : "Nao foi possivel calcular a faixa.", true);
+    }
+  }
+}
+
+function renderCalculatedRange(range) {
+  fields.minPrice.value = range.minFormatted || "";
+  fields.maxPrice.value = range.maxFormatted || "";
+  fields.rangeSummary.textContent = `${range.basisLabel}: ${range.valueFormatted}. Faixa normativa: ${range.minFormatted} a ${range.maxFormatted}.`;
+}
+
+function updateRangeMode() {
+  const automatic = fields.autoRange.checked;
+  fields.minPrice.readOnly = automatic;
+  fields.maxPrice.readOnly = automatic;
+
+  if (automatic) {
+    fields.rangeSummary.textContent = "Faixa calculada pela media/mediana selecionada na pagina.";
+    refreshCalculatedRange(false);
+    return;
+  }
+
+  fields.rangeSummary.textContent = "Faixa manual informada pelo usuario.";
+}
+
 async function getActiveSerproTab() {
+  if (Number.isInteger(sourceTabId) && sourceTabId > 0) {
+    const sourceTab = await chrome.tabs.get(sourceTabId).catch(() => null);
+    if (!sourceTab?.id) {
+      setStatus("A aba original nao esta mais disponivel.", true);
+      return null;
+    }
+
+    if (!isSerproTab(sourceTab)) {
+      setStatus("Abra uma pagina do Pesquisa de Precos do SERPRO antes de usar a extensao.", true);
+      return null;
+    }
+
+    return sourceTab;
+  }
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) {
     setStatus("Nao foi possivel acessar a aba atual.", true);
     return null;
   }
 
-  if (!tab.url?.startsWith("https://pesqpreco.estaleiro.serpro.gov.br/")) {
+  if (!isSerproTab(tab)) {
     setStatus("Abra uma pagina do Pesquisa de Precos do SERPRO antes de usar a extensao.", true);
     return null;
   }
 
   return tab;
+}
+
+function isSerproTab(tab) {
+  return tab?.url?.startsWith("https://pesqpreco.estaleiro.serpro.gov.br/");
 }
 
 async function ensureContentScript(tabId) {
@@ -200,31 +281,73 @@ async function ensureContentScript(tabId) {
   });
 }
 
+function sendContentMessage(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        resolve({ ok: false, message: error.message });
+        return;
+      }
+
+      resolve(response);
+    });
+  });
+}
+
+async function storageGet(areaName, defaults) {
+  const area = getStorageArea(areaName);
+  return area.get(defaults);
+}
+
+async function storageSet(areaName, values) {
+  const area = getStorageArea(areaName);
+  return area.set(values);
+}
+
+function getStorageArea(areaName) {
+  const storage = typeof chrome === "undefined" ? null : chrome.storage;
+  const area = storage?.[areaName] || storage?.local;
+  if (!area?.get || !area?.set) {
+    throw new Error("Storage da extensao indisponivel. Recarregue a extensao em chrome://extensions.");
+  }
+
+  return area;
+}
+
 function readSettings() {
-  return {
-    mode: fields.mode.value,
-    minPrice: fields.minPrice.value.trim(),
-    maxPrice: fields.maxPrice.value.trim(),
-    inclusive: fields.inclusive.checked,
-    scanAllPages: fields.scanAllPages.checked
+  const settings = {
+    mode: "outside",
+    dynamicRange: fields.autoRange.checked,
+    autoRange: fields.autoRange.checked,
+    scanAllPages: true
   };
+
+  if (!fields.autoRange.checked) {
+    settings.minPrice = fields.minPrice.value.trim();
+    settings.maxPrice = fields.maxPrice.value.trim();
+  }
+
+  return settings;
 }
 
 function validate(settings, action) {
-  const needsMin = action === "delete" || settings.mode !== "below";
-  const needsMax = action === "delete" || settings.mode !== "above";
+  if (settings.dynamicRange) {
+    return "";
+  }
+
   const min = parseDecimal(settings.minPrice);
   const max = parseDecimal(settings.maxPrice);
 
-  if (needsMin && min === null) {
+  if (min === null) {
     return "Informe um valor minimo valido.";
   }
 
-  if (needsMax && max === null) {
+  if (max === null) {
     return "Informe um valor maximo valido.";
   }
 
-  if (needsMin && needsMax && min > max) {
+  if (min > max) {
     return "O minimo nao pode ser maior que o maximo.";
   }
 

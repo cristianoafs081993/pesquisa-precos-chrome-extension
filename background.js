@@ -1,3 +1,21 @@
+const POPUP_WINDOW_WIDTH = 400;
+const POPUP_WINDOW_HEIGHT = 720;
+
+chrome.action.onClicked.addListener((tab) => {
+  const popupUrl = new URL(chrome.runtime.getURL("popup.html"));
+  if (tab?.id) {
+    popupUrl.searchParams.set("sourceTabId", String(tab.id));
+  }
+
+  chrome.windows.create({
+    url: popupUrl.toString(),
+    type: "popup",
+    width: POPUP_WINDOW_WIDTH,
+    height: POPUP_WINDOW_HEIGHT,
+    focused: true
+  });
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message?.type?.startsWith("PP_MARKET_")) {
     return false;

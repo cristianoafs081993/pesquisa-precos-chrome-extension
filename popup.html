@@ -14,38 +14,21 @@
         <strong>Preco unitario</strong> e <strong>Compor</strong>.
       </p>
 
-      <section class="section">
-        <h2>Desmarcar Compor</h2>
-        <label class="field">
-          <span>Criterio para desmarcar</span>
-          <select id="mode">
-            <option value="between">Preco dentro da faixa informada</option>
-            <option value="outside">Preco fora da faixa permitida</option>
-            <option value="above">Preco acima do minimo</option>
-            <option value="below">Preco abaixo do maximo</option>
-          </select>
-        </label>
-      </section>
-
       <div class="grid">
         <label class="field">
           <span>Minimo</span>
-          <input id="minPrice" type="text" inputmode="decimal" placeholder="50">
+          <input id="minPrice" type="text" readonly placeholder="Calculando...">
         </label>
         <label class="field">
           <span>Maximo</span>
-          <input id="maxPrice" type="text" inputmode="decimal" placeholder="100">
+          <input id="maxPrice" type="text" readonly placeholder="Calculando...">
         </label>
       </div>
+      <p id="rangeSummary" class="hint compact">Faixa calculada pela media/mediana selecionada na pagina.</p>
 
       <label class="checkbox">
-        <input id="inclusive" type="checkbox">
-        <span>Incluir valores iguais aos limites</span>
-      </label>
-
-      <label class="checkbox">
-        <input id="scanAllPages" type="checkbox" checked>
-        <span>Tentar processar todas as linhas carregadas na pagina</span>
+        <input id="autoRange" type="checkbox" checked>
+        <span>Calcular automaticamente pela media/mediana selecionada</span>
       </label>
 
       <button id="floatingPanel" type="button" class="secondary full-width">Abrir painel flutuante</button>

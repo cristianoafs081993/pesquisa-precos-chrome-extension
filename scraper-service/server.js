@@ -59,9 +59,10 @@ function createAppServer({ searchProvidersImpl = searchProviders } = {}) {
       originalQuery: query
     });
     const rankedResults = rerankResultsWithCatalog(results, enrichment);
+    const diversifiedResults = interleaveResultsByProvider(rankedResults, selectedProviders.map((provider) => provider.id));
 
     sendJson(response, 200, {
-      results: rankedResults.slice(0, MAX_RESULTS),
+      results: diversifiedResults.slice(0, MAX_RESULTS),
       meta: {
         query,
         queryPrimary: enrichment.queryPrimary || query,
@@ -127,8 +128,22 @@ async function searchProviders(query, selectedProviders) {
 }
 
 async function scrapeProvider(context, provider, query) {
-  const page = await context.newPage();
   const url = provider.buildUrl(query);
+  if (typeof provider.extractFromHtml === "function") {
+    const response = await fetch(url, {
+      headers: provider.requestHeaders || {}
+    });
+    if (!response.ok) {
+      throw new Error(`Busca falhou (${response.status}) em ${provider.name}`);
+    }
+
+    const html = await response.text();
+    return provider.extractFromHtml(html, url, MAX_RESULTS_PER_PROVIDER)
+      .map((item) => normalizeProviderResult(item, provider))
+      .filter(Boolean);
+  }
+
+  const page = await context.newPage();
 
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS });
@@ -161,16 +176,30 @@ function extractCards(nodes, config) {
   // Mantenha-a independente de variaveis externas do Node.
   const pickText = (root, selector) => {
     if (!selector) return "";
-    const elements = Array.from(root.querySelectorAll(selector));
+    const elements = [
+      root.matches?.(selector) ? root : null,
+      ...Array.from(root.querySelectorAll(selector))
+    ].filter(Boolean);
     const element = elements.find((candidate) => candidate.textContent && candidate.textContent.trim());
     return element ? element.textContent.trim().replace(/\s+/g, " ") : "";
   };
 
   const pickAttr = (root, selector, attr) => {
     if (!selector) return "";
-    const elements = Array.from(root.querySelectorAll(selector));
+    const elements = [
+      root.matches?.(selector) ? root : null,
+      ...Array.from(root.querySelectorAll(selector))
+    ].filter(Boolean);
     const element = elements.find((candidate) => candidate.getAttribute(attr));
     return element ? element.getAttribute(attr) : "";
+  };
+
+  const pickAnyAttr = (root, selector, attrs) => {
+    for (const attr of attrs) {
+      const value = pickAttr(root, selector, attr);
+      if (value) return value;
+    }
+    return "";
   };
 
   const toAbsoluteUrl = (value) => {
@@ -194,6 +223,14 @@ function extractCards(nodes, config) {
   const pickPrice = (root) => {
     const price = normalizePrice(pickText(root, config.priceSelector));
     if (price) return price;
+    const priceElements = [
+      root.matches?.(config.priceSelector) ? root : null,
+      ...Array.from(root.querySelectorAll(config.priceSelector || ""))
+    ].filter(Boolean);
+    for (const element of priceElements) {
+      const candidate = normalizePrice(element.textContent || "");
+      if (candidate) return candidate;
+    }
     return normalizePrice(
       pickText(root, config.priceWholeSelector),
       pickText(root, config.priceFractionSelector)
@@ -208,7 +245,7 @@ function extractCards(nodes, config) {
   return nodes.slice(0, config.maxResults * 2).map((node) => {
     const title = cleanTitle(pickText(node, config.titleSelector) || pickAttr(node, config.linkSelector, "title"));
     const link = toAbsoluteUrl(pickAttr(node, config.linkSelector, "href"));
-    const image = toAbsoluteUrl(pickAttr(node, config.imageSelector, "src") || pickAttr(node, config.imageSelector, "data-src"));
+    const image = toAbsoluteUrl(pickAnyAttr(node, config.imageSelector, ["src", "data-src", "data-lazy", "data-original", "srcset"]).split(/\s+/)[0]);
     const price = pickPrice(node);
 
     return {
@@ -335,6 +372,28 @@ function interleaveResults(groupedResults) {
   return output;
 }
 
+function interleaveResultsByProvider(results, providerOrder = []) {
+  if (!Array.isArray(results) || !results.length) {
+    return [];
+  }
+
+  const groups = new Map();
+  for (const result of results) {
+    const providerId = result?.provider || "unknown";
+    if (!groups.has(providerId)) {
+      groups.set(providerId, []);
+    }
+    groups.get(providerId).push(result);
+  }
+
+  const orderedProviderIds = [
+    ...providerOrder.filter((providerId) => groups.has(providerId)),
+    ...Array.from(groups.keys()).filter((providerId) => !providerOrder.includes(providerId))
+  ];
+
+  return interleaveResults(orderedProviderIds.map((providerId) => groups.get(providerId)));
+}
+
 function dedupeResults(results) {
   const seen = new Set();
   return results.filter((result) => {
@@ -417,6 +476,7 @@ module.exports = {
   normalizePriceText,
   selectProviders,
   interleaveResults,
+  interleaveResultsByProvider,
   dedupeResults,
   normalizeUrl,
   hostname,

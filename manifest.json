@@ -29,7 +29,6 @@
     }
   ],
   "action": {
-    "default_title": "Regra de Compor",
-    "default_popup": "popup.html"
+    "default_title": "Regra de Compor"
   }
 }

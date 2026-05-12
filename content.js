@@ -1,5 +1,5 @@
 (() => {
-const EXTENSION_SCRIPT_VERSION = "2.8.0";
+const EXTENSION_SCRIPT_VERSION = "2.8.3";
 
 if (window.__ppComporExtensionVersion === EXTENSION_SCRIPT_VERSION) {
   return;
@@ -14,11 +14,12 @@ const CLICK_DELAY_MS = 500;
 const DELETE_DELAY_MS = 1200;
 const MODAL_TIMEOUT_MS = 7000;
 const MODAL_CLOSE_TIMEOUT_MS = 3000;
+const RULE_RANGE_PERCENT = 0.25;
 const MARKET_BUTTON_CLASS = "pp-market-item-button";
 const MARKET_STATUS_CLASS = "pp-market-row-status";
 const DEFAULT_MARKET_SEARCH_ENDPOINT = "http://10.50.6.5:8787/search";
 const MARKET_SOURCE_CONFIG_KEY = "marketSourceConfig";
-const MARKET_SOURCE_CONFIG_VERSION = 2;
+const MARKET_SOURCE_CONFIG_VERSION = 4;
 const MARKET_FREIGHT_CONFIG_KEY = "marketFreightConfig";
 const MARKET_PREFETCH_MAX_QUEUE = 8;
 const MARKET_PREFETCH_DISABLED_MS = 60000;
@@ -27,8 +28,8 @@ const MARKET_INITIAL_RESULT_COUNT = 3;
 const MARKET_RESULT_INCREMENT = 3;
 const DEFAULT_MARKET_SOURCES = [
   { id: "amazon", name: "Amazon Brasil", enabled: true, priority: 1, searchUrlTemplate: "https://www.amazon.com.br/s?k={query}" },
-  { id: "magalu", name: "Magazine Luiza", enabled: false, priority: 2, searchUrlTemplate: "https://www.magazineluiza.com.br/busca/{query}/" },
-  { id: "americanas", name: "Americanas", enabled: false, priority: 3, searchUrlTemplate: "https://www.americanas.com.br/busca/{query}" },
+  { id: "magalu", name: "Magazine Luiza", enabled: true, priority: 2, searchUrlTemplate: "https://m.magazineluiza.com.br/busca/{query}/" },
+  { id: "americanas", name: "Americanas", enabled: true, priority: 3, searchUrlTemplate: "https://www.americanas.com.br/busca/{query}" },
   { id: "casasbahia", name: "Casas Bahia", enabled: false, priority: 4, searchUrlTemplate: "https://www.casasbahia.com.br/{query}/b" },
   { id: "kabum", name: "KaBuM", enabled: false, priority: 5, searchUrlTemplate: "https://www.kabum.com.br/busca/{query}" },
   { id: "dell", name: "Dell Brasil", enabled: false, priority: 6, searchUrlTemplate: "https://www.dell.com/pt-br/search/{query}" },
@@ -49,7 +50,10 @@ const DELETE_REASON_HIGH = {
 let extensionContextAlive = true;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type !== "PP_RUN_COMPOR_RULE_V2" && message?.type !== "PP_UNDO_COMPOR_RULE_V2" && message?.type !== "PP_SHOW_FLOATING_PANEL_V2") {
+  if (message?.type !== "PP_RUN_COMPOR_RULE_V2" &&
+      message?.type !== "PP_UNDO_COMPOR_RULE_V2" &&
+      message?.type !== "PP_SHOW_FLOATING_PANEL_V2" &&
+      message?.type !== "PP_GET_COMPOR_RANGE_V2") {
     return false;
   }
 
@@ -108,6 +112,10 @@ function getMessageTask(message) {
     return Promise.resolve({ shown: true });
   }
 
+  if (message.type === "PP_GET_COMPOR_RANGE_V2") {
+    return Promise.resolve({ range: getSelectedReferenceRange() });
+  }
+
   return runRule(message.action, message.settings);
 }
 
@@ -127,6 +135,7 @@ async function runRule(action, settings) {
     throw new Error("Nao encontrei linhas da tabela nesta pagina.");
   }
 
+  const effectiveConfig = resolveRuleConfig(config);
   let scanned = 0;
   let matched = 0;
   let changed = 0;
@@ -144,7 +153,7 @@ async function runRule(action, settings) {
 
     scanned += 1;
 
-    if (!matchesRule(price, config)) {
+    if (!matchesRule(price, effectiveConfig)) {
       continue;
     }
 
@@ -177,7 +186,8 @@ async function runRule(action, settings) {
     matched,
     changed,
     alreadyUnchecked,
-    missingControl
+    missingControl,
+    range: effectiveConfig.range || null
   };
 }
 
@@ -229,16 +239,38 @@ async function undoLastRun() {
 }
 
 async function deleteOutOfRange(config) {
-  const initialRows = findRows().filter((row) => config.scanAllPages || isVisible(row.element));
-  const initialSummary = summarizeDeleteCandidates(initialRows, config);
+  const firstRows = findRows().filter((row) => config.scanAllPages || isVisible(row.element));
+  if (!firstRows.length) {
+    throw new Error("Nao encontrei linhas da tabela nesta pagina.");
+  }
 
+  const maxAttempts = Math.max(firstRows.length * 2, 20);
   let changed = 0;
   let missingDeleteButton = 0;
   let modalErrors = 0;
+  let scanned = 0;
+  let matched = 0;
+  let lastRange = null;
+  let initialSummaryCaptured = false;
   const skippedRows = new Set();
 
-  for (let attempt = 0; attempt < initialSummary.matched; attempt += 1) {
-    const candidate = findNextDeleteCandidate(config, skippedRows);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const effectiveConfig = resolveRuleConfig(config);
+    lastRange = effectiveConfig.range || lastRange;
+    const rows = findRows().filter((row) => config.scanAllPages || isVisible(row.element));
+    const summary = summarizeDeleteCandidates(rows, effectiveConfig);
+
+    if (!initialSummaryCaptured) {
+      scanned = summary.scanned;
+      matched = summary.matched;
+      initialSummaryCaptured = true;
+    }
+
+    if (!summary.matched) {
+      break;
+    }
+
+    const candidate = findNextDeleteCandidate(effectiveConfig, skippedRows);
     if (!candidate) {
       break;
     }
@@ -271,11 +303,12 @@ async function deleteOutOfRange(config) {
   }
 
   return {
-    scanned: initialSummary.scanned,
-    matched: initialSummary.matched,
+    scanned,
+    matched,
     changed,
     missingDeleteButton,
-    modalErrors
+    modalErrors,
+    range: lastRange
   };
 }
 
@@ -344,7 +377,7 @@ function getDeleteRowKey(row, price) {
 }
 
 function normalizeSettings(settings) {
-  const mode = settings?.mode || "between";
+  const mode = "outside";
   const min = parseDecimal(settings?.minPrice);
   const max = parseDecimal(settings?.maxPrice);
 
@@ -352,9 +385,316 @@ function normalizeSettings(settings) {
     mode,
     min,
     max,
-    inclusive: Boolean(settings?.inclusive),
+    dynamicRange: settings?.dynamicRange !== false,
     scanAllPages: settings?.scanAllPages !== false
   };
+}
+
+function resolveRuleConfig(config) {
+  if (!config.dynamicRange) {
+    return config;
+  }
+
+  const range = getSelectedReferenceRange();
+  return {
+    ...config,
+    min: range.min,
+    max: range.max,
+    range
+  };
+}
+
+function getSelectedReferenceRange() {
+  const selection = findSelectedReferenceMetric();
+  if (!selection) {
+    throw new Error("Nao encontrei a opcao marcada entre Media e Mediana na pagina.");
+  }
+
+  const value = findReferenceValueForMetric(selection);
+  if (value === null) {
+    throw new Error(`Nao encontrei o valor de ${getReferenceMetricLabel(selection.metric)} na pagina.`);
+  }
+
+  const min = value * (1 - RULE_RANGE_PERCENT);
+  const max = value * (1 + RULE_RANGE_PERCENT);
+
+  return {
+    basis: selection.metric,
+    basisLabel: getReferenceMetricLabel(selection.metric),
+    value,
+    min,
+    max,
+    percent: RULE_RANGE_PERCENT * 100,
+    valueFormatted: formatRuleCurrency(value),
+    minFormatted: formatRuleCurrency(min),
+    maxFormatted: formatRuleCurrency(max)
+  };
+}
+
+function findSelectedReferenceMetric() {
+  const controls = Array.from(document.querySelectorAll("input[type='radio'], [role='radio'], .p-radiobutton, .mat-radio-button, .mat-mdc-radio-button"));
+
+  for (const control of controls) {
+    if (!isReferenceControlChecked(control)) {
+      continue;
+    }
+
+    const nearbyLabel = findNearestReferenceMetricLabel(control);
+    if (nearbyLabel) {
+      return nearbyLabel;
+    }
+
+    const metric = detectReferenceMetric(getMetricSearchText(control));
+    if (metric) {
+      return {
+        metric,
+        element: findMetricLabelElement(metric, control) || findVisibleMetricAnchor(control) || control
+      };
+    }
+  }
+
+  return null;
+}
+
+function findNearestReferenceMetricLabel(control) {
+  const anchorRect = getUsableElementRect(control);
+  if (!anchorRect) {
+    return null;
+  }
+
+  const anchorX = anchorRect.left + anchorRect.width / 2;
+  const anchorY = anchorRect.top + anchorRect.height / 2;
+  const candidates = Array.from(document.querySelectorAll("body *"))
+    .map((element) => {
+      const text = getElementOwnText(element) || "";
+      const metric = detectReferenceMetric(text);
+      if (!metric || text.length > 40 || !isMetricElementVisible(element)) {
+        return null;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const verticalDistance = Math.abs(centerY - anchorY);
+      if (verticalDistance > 36) {
+        return null;
+      }
+
+      return {
+        metric,
+        element,
+        score: Math.abs(centerX - anchorX) + verticalDistance * 2
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.score - right.score);
+
+  return candidates[0] || null;
+}
+
+function isReferenceControlChecked(control) {
+  if (control.matches?.("input[type='radio']") && control.checked) {
+    return true;
+  }
+
+  if (control.getAttribute?.("aria-checked") === "true") {
+    return true;
+  }
+
+  const checkedAncestor = control.closest?.("[aria-checked='true'], .p-radiobutton-checked, .mat-radio-checked, .mat-mdc-radio-checked");
+  return Boolean(checkedAncestor);
+}
+
+function getMetricSearchText(control) {
+  const parts = [];
+  const id = control.id || control.querySelector?.("input[type='radio']")?.id || "";
+  const label = id ? document.querySelector(`label[for="${cssEscape(id)}"]`) : null;
+  const closestLabel = control.closest?.("label");
+
+  if (label) {
+    parts.push(label.innerText || label.textContent || "");
+  }
+
+  if (closestLabel) {
+    parts.push(closestLabel.innerText || closestLabel.textContent || "");
+  }
+
+  let current = control;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    parts.push(current.innerText || current.textContent || "");
+    parts.push(current.previousElementSibling?.innerText || current.previousElementSibling?.textContent || "");
+    parts.push(current.nextElementSibling?.innerText || current.nextElementSibling?.textContent || "");
+    current = current.parentElement;
+  }
+
+  return parts.join(" ");
+}
+
+function detectReferenceMetric(text) {
+  const normalized = normalizeText(text);
+  if (/\bmediana\b/.test(normalized)) {
+    return "mediana";
+  }
+
+  if (/\bmedia\b/.test(normalized)) {
+    return "media";
+  }
+
+  return "";
+}
+
+function findMetricLabelElement(metric, control) {
+  const id = control.id || control.querySelector?.("input[type='radio']")?.id || "";
+  const associatedLabel = id ? document.querySelector(`label[for="${cssEscape(id)}"]`) : null;
+  if (associatedLabel && detectReferenceMetric(associatedLabel.innerText || associatedLabel.textContent || "") === metric) {
+    return associatedLabel;
+  }
+
+  const scope = control.closest?.("label, div, section, article, form") || control.parentElement;
+  const labels = Array.from((scope || document).querySelectorAll?.("*") || [])
+    .filter((element) => {
+      const text = getElementOwnText(element) || element.innerText || element.textContent || "";
+      return detectReferenceMetric(text) === metric && isMetricElementVisible(element);
+    })
+    .sort((left, right) => getElementTextLength(left) - getElementTextLength(right));
+
+  return labels[0] || null;
+}
+
+function findVisibleMetricAnchor(control) {
+  let current = control;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    if (isMetricElementVisible(current)) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function findReferenceValueForMetric(selection) {
+  const anchor = selection.element || null;
+  const fromAnchor = findNearestMoneyValue(anchor);
+  if (fromAnchor !== null) {
+    return fromAnchor;
+  }
+
+  const metricLine = findMetricValueFromText(selection.metric);
+  if (metricLine !== null) {
+    return metricLine;
+  }
+
+  return null;
+}
+
+function findNearestMoneyValue(anchor) {
+  if (!anchor) {
+    return null;
+  }
+
+  const anchorRect = getUsableElementRect(anchor);
+  if (!anchorRect) {
+    return null;
+  }
+
+  const anchorX = anchorRect.left + anchorRect.width / 2;
+  const candidates = Array.from(document.querySelectorAll("body *"))
+    .map((element) => {
+      const text = getElementOwnText(element) || element.innerText || element.textContent || "";
+      if (!/R\$\s*[\d.]+,\d{2,4}/.test(text) || text.length > 120 || !isMetricElementVisible(element)) {
+        return null;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const value = parseMoney(text.match(/R\$\s*[\d.]+,\d{2,4}/)?.[0] || text);
+      if (value === null) {
+        return null;
+      }
+
+      const verticalDistance = rect.top - anchorRect.bottom;
+      if (verticalDistance < -32 || verticalDistance > 220) {
+        return null;
+      }
+
+      const centerX = rect.left + rect.width / 2;
+      return {
+        value,
+        score: Math.abs(centerX - anchorX) * 2 + Math.abs(verticalDistance)
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.score - right.score);
+
+  return candidates[0]?.value ?? null;
+}
+
+function findMetricValueFromText(metric) {
+  const label = getReferenceMetricLabel(metric);
+  const lines = String(document.body?.innerText || "").split(/\n+/);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (detectReferenceMetric(lines[index]) !== metric) {
+      continue;
+    }
+
+    const nearby = lines.slice(index, index + 4).join(" ");
+    const match = nearby.match(/R\$\s*[\d.]+,\d{2,4}/);
+    if (match) {
+      return parseMoney(match[0]);
+    }
+  }
+
+  const bodyText = String(document.body?.innerText || "");
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const directMatch = bodyText.match(new RegExp(`${escapedLabel}[\\s\\S]{0,120}(R\\$\\s*[\\d.]+,\\d{2,4})`, "i"));
+  return directMatch ? parseMoney(directMatch[1]) : null;
+}
+
+function getReferenceMetricLabel(metric) {
+  return metric === "media" ? "Media" : "Mediana";
+}
+
+function getElementOwnText(element) {
+  return Array.from(element.childNodes || [])
+    .filter((node) => node.nodeType === Node.TEXT_NODE)
+    .map((node) => node.textContent || "")
+    .join(" ")
+    .trim();
+}
+
+function getElementTextLength(element) {
+  return String(element.innerText || element.textContent || "").length;
+}
+
+function isMetricElementVisible(element) {
+  const rect = element.getBoundingClientRect?.();
+  const style = window.getComputedStyle?.(element);
+  return Boolean(rect) &&
+    rect.width > 0 &&
+    rect.height > 0 &&
+    style?.display !== "none" &&
+    style?.visibility !== "hidden";
+}
+
+function getUsableElementRect(element) {
+  let current = element;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    if (isMetricElementVisible(current)) {
+      return current.getBoundingClientRect();
+    }
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) {
+    return window.CSS.escape(value);
+  }
+
+  return String(value).replace(/["\\]/g, "\\$&");
 }
 
 function findRows() {
@@ -531,24 +871,9 @@ function isElementVisible(element) {
 }
 
 function matchesRule(price, config) {
-  const aboveMin = config.inclusive ? price >= config.min : price > config.min;
-  const belowMax = config.inclusive ? price <= config.max : price < config.max;
-
-  if (config.mode === "above") {
-    return aboveMin;
-  }
-
-  if (config.mode === "below") {
-    return belowMax;
-  }
-
-  if (config.mode === "outside") {
-    const belowMin = config.inclusive ? price < config.min : price <= config.min;
-    const aboveMax = config.inclusive ? price > config.max : price >= config.max;
-    return belowMin || aboveMax;
-  }
-
-  return aboveMin && belowMax;
+  const belowMin = config.min !== null && price < config.min;
+  const aboveMax = config.max !== null && price > config.max;
+  return belowMin || aboveMax;
 }
 
 function uncheckCompor(row) {
@@ -807,26 +1132,34 @@ function showFloatingPanel(initialSettings) {
   startMarketItemObserver();
 
   const existing = document.querySelector("#pp-compor-floating-panel");
-  if (existing && !existing.querySelector("[data-pp-tab]")) {
+  if (existing && existing.dataset.ppPanelVersion !== "range-v2") {
     existing.remove();
   } else if (existing) {
     existing.style.display = "block";
     existing.querySelector("[data-pp-status]").textContent = "Painel pronto.";
+    if (initialSettings) {
+      existing.querySelector("[data-pp-auto-range]").checked = initialSettings.dynamicRange !== false && initialSettings.autoRange !== false;
+      if (initialSettings.dynamicRange === false || initialSettings.autoRange === false) {
+        existing.querySelector("[data-pp-min]").value = initialSettings.minPrice || "50";
+        existing.querySelector("[data-pp-max]").value = initialSettings.maxPrice || "100";
+      }
+    }
     selectFloatingTab(existing, initialSettings?.activeTab || "adjust");
     ensureMarketItemButtons();
+    updateFloatingRangeMode(existing);
     return;
   }
 
   const settings = {
-    mode: initialSettings?.mode || "between",
+    mode: "outside",
     minPrice: initialSettings?.minPrice || "50",
     maxPrice: initialSettings?.maxPrice || "100",
-    inclusive: Boolean(initialSettings?.inclusive),
-    scanAllPages: initialSettings?.scanAllPages !== false
+    autoRange: initialSettings?.dynamicRange !== false && initialSettings?.autoRange !== false
   };
 
   const panel = document.createElement("div");
   panel.id = "pp-compor-floating-panel";
+  panel.dataset.ppPanelVersion = "range-v2";
   panel.innerHTML = `
     <div class="pp-floating-header" data-pp-drag>
       <strong>Pesquisa de Preços</strong>
@@ -838,32 +1171,20 @@ function showFloatingPanel(initialSettings) {
         <button type="button" role="tab" data-pp-tab="market" aria-selected="false">Pesquisa de mercado</button>
       </div>
       <section class="pp-floating-tab-panel" data-pp-tab-panel="adjust">
-        <label>
-          <span>Criterio para desmarcar</span>
-          <select data-pp-mode>
-            <option value="between">Preço dentro da faixa</option>
-            <option value="outside">Preço fora da faixa</option>
-            <option value="above">Preço acima do mínimo</option>
-            <option value="below">Preço abaixo do máximo</option>
-          </select>
-        </label>
         <div class="pp-floating-grid">
           <label>
             <span>Minimo</span>
-            <input data-pp-min type="text" inputmode="decimal">
+            <input data-pp-min type="text" readonly placeholder="Calculando...">
           </label>
           <label>
             <span>Maximo</span>
-            <input data-pp-max type="text" inputmode="decimal">
+            <input data-pp-max type="text" readonly placeholder="Calculando...">
           </label>
         </div>
+        <p class="pp-floating-range" data-pp-range-summary>Faixa calculada pela media/mediana selecionada na pagina.</p>
         <label class="pp-floating-check">
-          <input data-pp-inclusive type="checkbox">
-          <span>Incluir iguais ao desmarcar</span>
-        </label>
-        <label class="pp-floating-check">
-          <input data-pp-scan-all type="checkbox">
-          <span>Processar linhas carregadas</span>
+          <input data-pp-auto-range type="checkbox">
+          <span>Calcular automaticamente pela media/mediana selecionada</span>
         </label>
         <div class="pp-floating-actions">
           <button type="button" data-pp-action="preview">Pre-visualizar</button>
@@ -890,11 +1211,17 @@ function showFloatingPanel(initialSettings) {
 
   document.documentElement.append(panel);
 
-  panel.querySelector("[data-pp-mode]").value = settings.mode;
+  panel.querySelector("[data-pp-auto-range]").checked = settings.autoRange;
   panel.querySelector("[data-pp-min]").value = settings.minPrice;
   panel.querySelector("[data-pp-max]").value = settings.maxPrice;
-  panel.querySelector("[data-pp-inclusive]").checked = settings.inclusive;
-  panel.querySelector("[data-pp-scan-all]").checked = settings.scanAllPages;
+  updateFloatingRangeMode(panel);
+  window.clearInterval(window.__ppComporRangeRefreshTimer);
+  window.__ppComporRangeRefreshTimer = window.setInterval(() => {
+    const currentPanel = document.querySelector("#pp-compor-floating-panel");
+    if (currentPanel?.style.display !== "none" && currentPanel.querySelector("[data-pp-auto-range]")?.checked) {
+      updateFloatingCalculatedRange(currentPanel);
+    }
+  }, 1500);
 
   panel.querySelector("[data-pp-close]").addEventListener("click", () => {
     panel.style.display = "none";
@@ -903,6 +1230,7 @@ function showFloatingPanel(initialSettings) {
   panel.querySelectorAll("[data-pp-action]").forEach((button) => {
     button.addEventListener("click", () => runFloatingAction(panel, button.dataset.ppAction));
   });
+  panel.querySelector("[data-pp-auto-range]").addEventListener("change", () => updateFloatingRangeMode(panel));
   panel.querySelectorAll("[data-pp-tab]").forEach((button) => {
     button.addEventListener("click", () => selectFloatingTab(panel, button.dataset.ppTab));
   });
@@ -974,6 +1302,7 @@ async function runFloatingAction(panel, action) {
     } else {
       status.textContent = `${response.changed} desmarcadas de ${response.matched} encontradas.`;
     }
+    updateFloatingCalculatedRange(panel);
   } catch (error) {
     status.classList.add("error");
     status.textContent = error instanceof Error ? error.message : "Erro inesperado.";
@@ -981,34 +1310,74 @@ async function runFloatingAction(panel, action) {
 }
 
 function readFloatingSettings(panel) {
-  return {
-    mode: panel.querySelector("[data-pp-mode]").value,
-    minPrice: panel.querySelector("[data-pp-min]").value.trim(),
-    maxPrice: panel.querySelector("[data-pp-max]").value.trim(),
-    inclusive: panel.querySelector("[data-pp-inclusive]").checked,
-    scanAllPages: panel.querySelector("[data-pp-scan-all]").checked
+  const autoRange = panel.querySelector("[data-pp-auto-range]").checked;
+  const settings = {
+    mode: "outside",
+    dynamicRange: autoRange,
+    autoRange,
+    scanAllPages: true
   };
+
+  if (!autoRange) {
+    settings.minPrice = panel.querySelector("[data-pp-min]").value.trim();
+    settings.maxPrice = panel.querySelector("[data-pp-max]").value.trim();
+  }
+
+  return settings;
 }
 
 function validateFloatingSettings(settings, action) {
-  const needsMin = action === "delete" || settings.mode !== "below";
-  const needsMax = action === "delete" || settings.mode !== "above";
+  if (settings.dynamicRange) {
+    return "";
+  }
+
   const min = parseDecimal(settings.minPrice);
   const max = parseDecimal(settings.maxPrice);
 
-  if (needsMin && min === null) {
+  if (min === null) {
     return "Informe um minimo valido.";
   }
 
-  if (needsMax && max === null) {
+  if (max === null) {
     return "Informe um maximo valido.";
   }
 
-  if (needsMin && needsMax && min > max) {
+  if (min > max) {
     return "O minimo nao pode ser maior que o maximo.";
   }
 
   return "";
+}
+
+function updateFloatingCalculatedRange(panel) {
+  if (!panel.querySelector("[data-pp-auto-range]")?.checked) {
+    return;
+  }
+
+  try {
+    const range = getSelectedReferenceRange();
+    panel.querySelector("[data-pp-min]").value = range.minFormatted;
+    panel.querySelector("[data-pp-max]").value = range.maxFormatted;
+    panel.querySelector("[data-pp-range-summary]").textContent = `${range.basisLabel}: ${range.valueFormatted}. Faixa normativa: ${range.minFormatted} a ${range.maxFormatted}.`;
+  } catch (_error) {
+    panel.querySelector("[data-pp-min]").value = "";
+    panel.querySelector("[data-pp-max]").value = "";
+    panel.querySelector("[data-pp-range-summary]").textContent = "Nao consegui ler a media/mediana selecionada na pagina.";
+  }
+}
+
+function updateFloatingRangeMode(panel) {
+  const automatic = panel.querySelector("[data-pp-auto-range]").checked;
+  panel.querySelector("[data-pp-min]").readOnly = automatic;
+  panel.querySelector("[data-pp-max]").readOnly = automatic;
+
+  if (automatic) {
+    panel.querySelector("[data-pp-range-summary]").textContent = "Faixa calculada pela media/mediana selecionada na pagina.";
+    updateFloatingCalculatedRange(panel);
+    return;
+  }
+
+  panel.querySelector("[data-pp-range-summary]").textContent = "Faixa manual informada pelo usuario.";
 }
 
 function makeFloatingPanelDraggable(panel) {
@@ -1149,6 +1518,16 @@ function ensureFloatingPanelStyle() {
       padding: 8px;
       font: inherit;
       font-weight: 400;
+    }
+    #pp-compor-floating-panel input[readonly] {
+      background: #eef2f6;
+      color: #475569;
+    }
+    #pp-compor-floating-panel .pp-floating-range {
+      margin: -2px 0 0;
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.35;
     }
     #pp-compor-floating-panel .pp-floating-grid,
     #pp-compor-floating-panel .pp-floating-actions {
@@ -1389,7 +1768,7 @@ function ensureMarketItemButtons() {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      openMarketItemPanel(parseMarketItemRow(row));
+      openMarketItemPanel(parseMarketItemRow(row)).catch(handleExtensionAsyncError);
     });
 
     actionsCell.append(button);
@@ -1515,13 +1894,13 @@ async function openMarketItemPanel(item) {
 }
 
 async function getMarketBackendConfig() {
-  const config = await chrome.storage.sync.get({
+  const config = await storageGet("sync", {
     marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT,
     marketSearchToken: ""
   });
   if (config.marketSearchEndpoint === "http://localhost:8787/search") {
     config.marketSearchEndpoint = DEFAULT_MARKET_SEARCH_ENDPOINT;
-    await chrome.storage.sync.set({ marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT });
+    await storageSet("sync", { marketSearchEndpoint: DEFAULT_MARKET_SEARCH_ENDPOINT });
   }
   return config;
 }
@@ -1598,13 +1977,26 @@ function renderAcceptedQuotes(item) {
     return `<div class="pp-market-muted">Nenhuma cotação aceita ainda.</div>`;
   }
 
-  return quotes.map((quote) => `
+  return quotes.map((quote) => {
+    const freightTotal = formatQuoteFreightTotal(quote);
+    const effectivePrice = formatQuoteEffectivePrice(quote);
+
+    return `
     <article class="pp-market-card">
+      ${quote.thumbnailLink ? `<img alt="" src="${escapeAttribute(quote.thumbnailLink)}">` : ""}
       <h4>${escapeHtml(quote.titulo)}</h4>
+      ${freightTotal || effectivePrice ? `
+      <div class="pp-market-edit-grid">
+        <input value="${escapeAttribute(freightTotal)}" placeholder="Frete total para a quantidade" readonly>
+        <input value="${escapeAttribute(effectivePrice)}" placeholder="Preco unitario com frete" readonly>
+      </div>
+      ` : ""}
+      <p class="pp-market-muted">${escapeHtml(getFreightStatusLabel(quote))}</p>
       <p>${escapeHtml(quote.dominio)} | ${escapeHtml(quote.precoEditado || "preço não informado")}</p>
       <p class="pp-market-success">Selecionada para relatório</p>
     </article>
-  `).join("");
+  `;
+  }).join("");
 }
 
 async function searchMarketForItem(panel, item, options = {}) {
@@ -1700,7 +2092,7 @@ async function searchMarketForItem(panel, item, options = {}) {
 }
 
 function renderMarketResults(item, results) {
-  const validResults = filterRenderableMarketResults(results, item);
+  const validResults = getRenderableMarketResults(item, results);
   if (!validResults.length) {
     return `<div class="pp-market-muted">Nenhum produto fiel ao termo de busca foi retornado pelas fontes ativas. Ajuste o termo ou habilite outra fonte em Fontes.</div>`;
   }
@@ -1715,23 +2107,31 @@ function renderMarketResults(item, results) {
       const isAccepted = Boolean(quote);
       const actionLabel = isAccepted ? "Já no relatório" : "Usar no relatório";
       const freightStatus = getFreightStatusLabel(quote);
-      const effectivePrice = quote?.precoUnitarioComFrete ? formatMoneyValue(quote.precoUnitarioComFrete) : "";
+      const displayTitle = quote?.titulo || result.title || "";
+      const displayDomain = quote?.dominio || result.displayLink || "";
+      const displaySnippet = quote?.snippet || result.snippet || "";
+      const thumbnailLink = quote?.thumbnailLink || result.thumbnailLink || "";
+      const priceValue = quote?.precoEditado || result.price || "";
+      const supplierValue = quote?.fornecedorEditado || quote?.dominio || result.displayLink || "";
+      const freightTotal = formatQuoteFreightTotal(quote);
+      const effectivePrice = formatQuoteEffectivePrice(quote);
+      const noteValue = quote?.observacao || "";
 
       return `
     <article class="pp-market-card${isAccepted ? " pp-market-card-selected" : ""}" data-pp-result-index="${index}">
-      ${result.thumbnailLink ? `<img alt="" src="${escapeAttribute(result.thumbnailLink)}">` : ""}
-      <h4>${escapeHtml(result.title)}</h4>
-      <p>${escapeHtml(result.displayLink)}</p>
-      <p>${escapeHtml(result.snippet)}</p>
+      ${thumbnailLink ? `<img alt="" src="${escapeAttribute(thumbnailLink)}">` : ""}
+      <h4>${escapeHtml(displayTitle)}</h4>
+      <p>${escapeHtml(displayDomain)}</p>
+      <p>${escapeHtml(displaySnippet)}</p>
       <div class="pp-market-edit-grid">
-        <input data-pp-price placeholder="Preço encontrado" value="${escapeAttribute(result.price || "")}">
-        <input data-pp-supplier placeholder="Fornecedor" value="${escapeAttribute(result.displayLink || "")}">
+        <input data-pp-price placeholder="Preço encontrado" value="${escapeAttribute(priceValue)}">
+        <input data-pp-supplier placeholder="Fornecedor" value="${escapeAttribute(supplierValue)}">
       </div>
       <div class="pp-market-edit-grid">
-        <input data-pp-freight-total placeholder="Frete total para a quantidade" value="${escapeAttribute(quote?.freteTotal !== undefined && quote?.freteTotal !== null ? formatMoneyValue(quote.freteTotal) : "")}">
+        <input data-pp-freight-total placeholder="Frete total para a quantidade" value="${escapeAttribute(freightTotal)}">
         <input data-pp-effective-price placeholder="Preço unitário com frete" value="${escapeAttribute(effectivePrice)}" readonly>
       </div>
-      <input data-pp-note placeholder="Observação/aderência do produto">
+      <input data-pp-note placeholder="Observação/aderência do produto" value="${escapeAttribute(noteValue)}">
       <p class="pp-market-muted" data-pp-freight-status>${escapeHtml(freightStatus)}</p>
       <div class="pp-market-card-actions">
         <button type="button" data-pp-open-result>Abrir pagina</button>
@@ -1769,6 +2169,39 @@ function getFreightStatusLabel(quote) {
   return "Frete pendente.";
 }
 
+function formatQuoteFreightTotal(quote) {
+  return quote?.freteTotal !== undefined && quote?.freteTotal !== null
+    ? formatMoneyValue(quote.freteTotal)
+    : "";
+}
+
+function formatQuoteEffectivePrice(quote) {
+  return quote?.precoUnitarioComFrete !== undefined && quote?.precoUnitarioComFrete !== null
+    ? formatMoneyValue(quote.precoUnitarioComFrete)
+    : "";
+}
+
+function getRenderableMarketResults(item, results) {
+  const acceptedQuotes = Object.values(item?.cotacoes || {}).filter((quote) => quote.status === "accepted");
+  const acceptedResults = acceptedQuotes.map(quoteToMarketResult).filter((result) => result.link && result.title);
+  const validResults = filterRenderableMarketResults(results, item)
+    .filter((result) => !getAcceptedQuoteForResult(item, result));
+
+  return [...acceptedResults, ...validResults];
+}
+
+function quoteToMarketResult(quote) {
+  return {
+    link: quote.url || quote.screenshotRequestedUrl || quote.screenshotUrl || "",
+    title: quote.titulo || "",
+    displayLink: quote.fornecedorEditado || quote.dominio || "",
+    snippet: quote.snippet || "",
+    price: quote.precoEditado || "",
+    thumbnailLink: quote.thumbnailLink || "",
+    provider: quote.provider || ""
+  };
+}
+
 function filterRenderableMarketResults(results, itemOrQuery = "") {
   if (!Array.isArray(results)) return [];
   const query = typeof itemOrQuery === "string"
@@ -1788,7 +2221,7 @@ function filterRenderableMarketResults(results, itemOrQuery = "") {
 }
 
 function attachMarketResultEvents(panel, item, results) {
-  const validResults = filterRenderableMarketResults(results, item).slice(0, getMarketVisibleResultLimit(item));
+  const validResults = getRenderableMarketResults(item, results).slice(0, getMarketVisibleResultLimit(item));
   panel.querySelectorAll("[data-pp-result-index]").forEach((card) => {
     const index = Number(card.dataset.ppResultIndex);
     const result = validResults[index];
@@ -1852,7 +2285,84 @@ async function ignoreMarketResult(panel, item, result) {
 
 function getAcceptedQuoteForResult(item, result) {
   const quote = item?.cotacoes?.[createQuoteId(result.link)];
-  return quote?.status === "accepted" ? quote : null;
+  if (quote?.status === "accepted") {
+    return quote;
+  }
+
+  const resultUrlKey = normalizeQuoteUrlForMatch(result?.link);
+  if (!resultUrlKey) {
+    return null;
+  }
+
+  return Object.values(item?.cotacoes || {}).find((itemQuote) => {
+    return itemQuote?.status === "accepted" &&
+      (
+        normalizeQuoteUrlForMatch(itemQuote.url || itemQuote.screenshotRequestedUrl) === resultUrlKey ||
+        isLikelySameMarketQuote(itemQuote, result)
+      );
+  }) || null;
+}
+
+function isLikelySameMarketQuote(quote, result) {
+  const quoteDomain = normalizeMarketDomainForMatch(quote.fornecedorEditado || quote.dominio || quote.url);
+  const resultDomain = normalizeMarketDomainForMatch(result.displayLink || result.link);
+  if (!quoteDomain || !resultDomain || quoteDomain !== resultDomain) {
+    return false;
+  }
+
+  return getTitleSimilarity(quote.titulo, result.title) >= 0.72;
+}
+
+function normalizeQuoteUrlForMatch(value) {
+  if (!value) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.replace(/^(www|m)\./i, "").toLowerCase();
+    const pathname = parsed.pathname.replace(/\/+$/g, "").toLowerCase();
+    return `${hostname}${pathname}`;
+  } catch (error) {
+    return String(value).split(/[?#]/)[0].replace(/\/+$/g, "").toLowerCase();
+  }
+}
+
+function normalizeMarketDomainForMatch(value) {
+  if (!value) {
+    return "";
+  }
+
+  try {
+    const parsed = String(value).startsWith("http")
+      ? new URL(value)
+      : new URL(`https://${String(value).replace(/^\/+/, "")}`);
+    return parsed.hostname.replace(/^(www|m)\./i, "").toLowerCase();
+  } catch (error) {
+    return String(value)
+      .replace(/^https?:\/\//i, "")
+      .split(/[/?#]/)[0]
+      .replace(/^(www|m)\./i, "")
+      .toLowerCase();
+  }
+}
+
+function getTitleSimilarity(left, right) {
+  const leftTokens = getTitleMatchTokens(left);
+  const rightTokens = getTitleMatchTokens(right);
+  if (!leftTokens.length || !rightTokens.length) {
+    return 0;
+  }
+
+  const rightSet = new Set(rightTokens);
+  const matches = leftTokens.filter((token) => rightSet.has(token)).length;
+  return matches / Math.max(leftTokens.length, rightTokens.length);
+}
+
+function getTitleMatchTokens(value) {
+  return Array.from(new Set(normalizeText(value)
+    .split(/[^a-z0-9]+/i)
+    .filter((token) => token.length >= 3)));
 }
 
 function isMarketResultRelevant(result, itemOrQuery) {
@@ -2048,6 +2558,7 @@ async function acceptMarketResult(panel, item, result, card, capture) {
     url: result.link,
     dominio: result.displayLink,
     snippet: result.snippet,
+    thumbnailLink: result.thumbnailLink || "",
     precoEditado: card.querySelector("[data-pp-price]").value.trim(),
     precoUnitario: priceValue,
     fornecedorEditado: card.querySelector("[data-pp-supplier]").value.trim(),
@@ -2196,7 +2707,7 @@ async function renderMarketSourcesConfig(panel) {
   current.querySelector("[data-pp-market-back]").addEventListener("click", () => renderCurrentMarketView(panel));
   current.querySelector("[data-pp-save-sources]").addEventListener("click", () => saveMarketSourcesFromPanel(panel));
   current.querySelector("[data-pp-reset-sources]").addEventListener("click", async () => {
-    await chrome.storage.sync.remove(MARKET_SOURCE_CONFIG_KEY);
+    await storageRemove("sync", MARKET_SOURCE_CONFIG_KEY);
     renderMarketSourcesConfig(panel);
   });
   results.querySelector("[data-pp-add-source]").addEventListener("click", () => addCustomMarketSource(panel));
@@ -2270,7 +2781,7 @@ async function resetMarketSession(panel) {
       .map((quote) => quote.screenshotId)
       .filter(Boolean);
   });
-  const data = await chrome.storage.local.get({
+  const data = await storageGet("local", {
     marketSessions: {},
     marketScreenshots: {}
   });
@@ -2280,7 +2791,7 @@ async function resetMarketSession(panel) {
     delete data.marketScreenshots[screenshotId];
   });
 
-  await chrome.storage.local.set({
+  await storageSet("local", {
     marketSessions: data.marketSessions,
     marketScreenshots: data.marketScreenshots
   });
@@ -2319,7 +2830,7 @@ function buildMarketProviderPayload(sources) {
 }
 
 async function getMarketSourceConfig() {
-  const data = await chrome.storage.sync.get({ [MARKET_SOURCE_CONFIG_KEY]: null });
+  const data = await storageGet("sync", { [MARKET_SOURCE_CONFIG_KEY]: null });
   const saved = data[MARKET_SOURCE_CONFIG_KEY];
   const savedSources = Array.isArray(saved?.sources) ? saved.sources : [];
   const canReuseBuiltInConfig = saved?.version === MARKET_SOURCE_CONFIG_VERSION;
@@ -2342,7 +2853,7 @@ async function getMarketSourceConfig() {
 }
 
 async function saveMarketSourceConfig(config) {
-  await chrome.storage.sync.set({
+  await storageSet("sync", {
     [MARKET_SOURCE_CONFIG_KEY]: {
       ...config,
       version: MARKET_SOURCE_CONFIG_VERSION
@@ -2351,7 +2862,7 @@ async function saveMarketSourceConfig(config) {
 }
 
 async function getMarketFreightConfig() {
-  const data = await chrome.storage.sync.get({ [MARKET_FREIGHT_CONFIG_KEY]: null });
+  const data = await storageGet("sync", { [MARKET_FREIGHT_CONFIG_KEY]: null });
   const saved = data[MARKET_FREIGHT_CONFIG_KEY] || {};
   return {
     cep: normalizeFreightZip(saved.cep || "")
@@ -2359,7 +2870,7 @@ async function getMarketFreightConfig() {
 }
 
 async function saveMarketFreightConfig(config) {
-  await chrome.storage.sync.set({
+  await storageSet("sync", {
     [MARKET_FREIGHT_CONFIG_KEY]: {
       cep: normalizeFreightZip(config?.cep || "")
     }
@@ -2501,7 +3012,7 @@ async function getMarketSession() {
   assertExtensionContext();
   const pesquisaId = detectPesquisaId();
   const sessionId = `market-${pesquisaId}`;
-  const data = await chrome.storage.local.get({ marketSessions: {} });
+  const data = await storageGet("local", { marketSessions: {} });
   const session = data.marketSessions[sessionId] || {
     sessionId,
     pesquisaId,
@@ -2515,9 +3026,9 @@ async function getMarketSession() {
 async function saveMarketSession(session) {
   assertExtensionContext();
   session.updatedAt = new Date().toISOString();
-  const data = await chrome.storage.local.get({ marketSessions: {} });
+  const data = await storageGet("local", { marketSessions: {} });
   data.marketSessions[session.sessionId] = session;
-  await chrome.storage.local.set({ marketSessions: data.marketSessions });
+  await storageSet("local", { marketSessions: data.marketSessions });
 }
 
 async function upsertMarketItem(item) {
@@ -2608,6 +3119,35 @@ function handleExtensionAsyncError(error) {
   console.warn("[Pesquisa de Precos] Falha assíncrona no content script:", error);
 }
 
+async function storageGet(areaName, defaults) {
+  const area = getStorageArea(areaName);
+  return area.get(defaults);
+}
+
+async function storageSet(areaName, values) {
+  const area = getStorageArea(areaName);
+  return area.set(values);
+}
+
+async function storageRemove(areaName, keys) {
+  const area = getStorageArea(areaName);
+  if (!area.remove) {
+    return;
+  }
+
+  return area.remove(keys);
+}
+
+function getStorageArea(areaName) {
+  const storage = typeof chrome === "undefined" ? null : chrome.storage;
+  const area = storage?.[areaName] || storage?.local;
+  if (!area?.get || !area?.set) {
+    throw new Error("Storage da extensao indisponivel. Recarregue a extensao e a pagina do SERPRO.");
+  }
+
+  return area;
+}
+
 function isExtensionContextInvalidatedError(error) {
   return /extension context invalidated/i.test(error?.message || String(error || ""));
 }
@@ -2615,9 +3155,35 @@ function isExtensionContextInvalidatedError(error) {
 function markExtensionContextInvalidated(options = {}) {
   extensionContextAlive = false;
   stopMarketAutomation();
+  showExtensionReloadNotice();
   if (options.throwError !== false) {
     throw new Error("Extension context invalidated");
   }
+}
+
+function showExtensionReloadNotice() {
+  if (document.querySelector("#pp-extension-reload-notice")) {
+    return;
+  }
+
+  const notice = document.createElement("div");
+  notice.id = "pp-extension-reload-notice";
+  notice.textContent = "A extensao foi recarregada. Recarregue esta pagina do SERPRO para continuar usando a pesquisa de mercado.";
+  notice.style.cssText = [
+    "position:fixed",
+    "right:16px",
+    "bottom:16px",
+    "z-index:2147483647",
+    "max-width:360px",
+    "padding:12px 14px",
+    "border:1px solid #f59e0b",
+    "border-radius:8px",
+    "background:#fff7ed",
+    "color:#7c2d12",
+    "font:14px/1.35 Segoe UI,Tahoma,sans-serif",
+    "box-shadow:0 12px 28px rgba(15,23,42,.18)"
+  ].join(";");
+  document.documentElement.append(notice);
 }
 
 function stopMarketAutomation() {
@@ -2656,9 +3222,9 @@ function hashString(value) {
 
 async function saveScreenshot(dataUrl) {
   const id = `shot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const data = await chrome.storage.local.get({ marketScreenshots: {} });
+  const data = await storageGet("local", { marketScreenshots: {} });
   data.marketScreenshots[id] = dataUrl;
-  await chrome.storage.local.set({ marketScreenshots: data.marketScreenshots });
+  await storageSet("local", { marketScreenshots: data.marketScreenshots });
   return id;
 }
 
@@ -2942,6 +3508,20 @@ function formatMoneyValue(value) {
   return new Intl.NumberFormat("pt-BR", {
     style: "currency",
     currency: "BRL"
+  }).format(number);
+}
+
+function formatRuleCurrency(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "";
+  }
+
+  return new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 4
   }).format(number);
 }
 

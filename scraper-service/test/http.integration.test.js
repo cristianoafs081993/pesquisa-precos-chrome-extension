@@ -48,6 +48,39 @@ test("search endpoint returns normalized mocked results and provider metadata", 
   }
 });
 
+test("search endpoint interleaves stores after ranking", async () => {
+  const server = createAppServer({
+    searchProvidersImpl: async () => [
+      { title: "cadeira magalu a", link: "https://magalu.example/a", price: "R$ 10,00", provider: "magalu", providerName: "Magazine Luiza" },
+      { title: "cadeira magalu b", link: "https://magalu.example/b", price: "R$ 11,00", provider: "magalu", providerName: "Magazine Luiza" },
+      { title: "cadeira magalu c", link: "https://magalu.example/c", price: "R$ 12,00", provider: "magalu", providerName: "Magazine Luiza" },
+      { title: "cadeira amazon a", link: "https://amazon.example/a", price: "R$ 13,00", provider: "amazon", providerName: "Amazon Brasil" },
+      { title: "cadeira americanas a", link: "https://americanas.example/a", price: "R$ 14,00", provider: "americanas", providerName: "Americanas" }
+    ]
+  });
+  const baseUrl = await listen(server);
+
+  try {
+    const response = await fetch(`${baseUrl}/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "cadeira", providers: ["amazon", "magalu", "americanas"] })
+    });
+    const data = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(data.results.slice(0, 5).map((item) => item.provider), [
+      "amazon",
+      "magalu",
+      "americanas",
+      "magalu",
+      "magalu"
+    ]);
+  } finally {
+    await close(server);
+  }
+});
+
 test("search endpoint validates query length", async () => {
   const server = createAppServer();
   const baseUrl = await listen(server);

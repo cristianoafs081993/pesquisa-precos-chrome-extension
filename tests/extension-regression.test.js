@@ -42,6 +42,50 @@ test("floating panel separates adjustment and market workflows in tabs", () => {
   assert.match(content, /selectFloatingTab\(panel, "market"\)/);
 });
 
+test("compor range is calculated from selected mean or median", () => {
+  const content = read("content.js");
+  const popupHtml = read("popup.html");
+  const popupJs = read("popup.js");
+
+  assert.match(content, /RULE_RANGE_PERCENT = 0\.25/);
+  assert.match(content, /PP_GET_COMPOR_RANGE_V2/);
+  assert.match(content, /function getSelectedReferenceRange/);
+  assert.match(content, /findSelectedReferenceMetric/);
+  assert.match(content, /findNearestMoneyValue/);
+  assert.match(content, /dynamicRange:\s*settings\?\.dynamicRange !== false/);
+  assert.match(popupHtml, /id="minPrice"[^>]*readonly/);
+  assert.match(popupHtml, /id="maxPrice"[^>]*readonly/);
+  assert.match(popupHtml, /id="autoRange"/);
+  assert.match(popupJs, /dynamicRange:\s*fields\.autoRange\.checked/);
+  assert.match(popupJs, /fields\.minPrice\.readOnly = automatic/);
+  assert.match(popupJs, /settings\.minPrice = fields\.minPrice\.value\.trim\(\)/);
+  assert.match(content, /data-pp-auto-range/);
+  assert.match(content, /function updateFloatingRangeMode/);
+  assert.match(popupHtml, /id="rangeSummary"[\s\S]*id="autoRange"/);
+  assert.match(content, /data-pp-range-summary[\s\S]*data-pp-auto-range/);
+  assert.doesNotMatch(popupHtml, /Incluir valores iguais/);
+  assert.doesNotMatch(content, /Incluir iguais ao desmarcar/);
+  assert.doesNotMatch(popupJs, /inclusive/);
+  assert.doesNotMatch(content, /inclusive/);
+});
+
+test("compor rule always targets prices outside the range", () => {
+  const content = read("content.js");
+  const popupHtml = read("popup.html");
+  const popupJs = read("popup.js");
+
+  assert.doesNotMatch(popupHtml, /Criterio para desmarcar/);
+  assert.doesNotMatch(popupHtml, /id="mode"/);
+  assert.doesNotMatch(content, /data-pp-mode/);
+  assert.match(popupJs, /mode:\s*"outside"/);
+  assert.match(content, /const mode = "outside"/);
+  assert.doesNotMatch(content, /config\.mode ===/);
+  assert.match(content, /price < config\.min/);
+  assert.match(content, /price > config\.max/);
+  assert.doesNotMatch(content, /price <= config\.min/);
+  assert.doesNotMatch(content, /price >= config\.max/);
+});
+
 test("market session screens provide back navigation and session reset", () => {
   const content = read("content.js");
   assert.match(content, /data-pp-reset-session/);
@@ -96,7 +140,20 @@ test("market quotes require freight and calculate unit price with apportioned fr
   assert.match(content, /priceValue \+ freightUnit/);
   assert.match(content, /freteUnitario: freightUnit/);
   assert.match(content, /precoUnitarioComFrete: effectiveUnitPrice/);
+  assert.match(content, /formatQuoteFreightTotal/);
+  assert.match(content, /formatQuoteEffectivePrice/);
+  assert.match(content, /thumbnailLink: result\.thumbnailLink \|\| ""/);
   assert.match(content, /Frete não encontrado automaticamente/);
+});
+
+test("accepted market result cards hydrate freight from saved quotes by normalized URL", () => {
+  const content = read("content.js");
+  assert.match(content, /function normalizeQuoteUrlForMatch/);
+  assert.match(content, /parsed\.hostname\.replace\(\/\^\(www\|m\)\\\./);
+  assert.match(content, /normalizeQuoteUrlForMatch\(itemQuote\.url \|\| itemQuote\.screenshotRequestedUrl\) === resultUrlKey/);
+  assert.match(content, /const freightTotal = formatQuoteFreightTotal\(quote\)/);
+  assert.match(content, /value="\$\{escapeAttribute\(freightTotal\)\}"/);
+  assert.match(content, /const effectivePrice = formatQuoteEffectivePrice\(quote\)/);
 });
 
 test("content script sends CATMAT context and stores enrichment signals", () => {
@@ -124,11 +181,12 @@ test("market item refreshes stale cached result sets automatically", () => {
   assert.match(content, /resultCacheVersion = MARKET_RESULT_CACHE_VERSION/);
 });
 
-test("market sources start with Amazon enabled and other default sources disabled", () => {
+test("market sources start with Amazon, Magalu and Americanas enabled", () => {
   const content = read("content.js");
   assert.match(content, /\{\s*id:\s*"amazon"[\s\S]*?enabled:\s*true/);
-  assert.match(content, /\{\s*id:\s*"magalu"[\s\S]*?enabled:\s*false/);
-  assert.match(content, /\{\s*id:\s*"americanas"[\s\S]*?enabled:\s*false/);
+  assert.match(content, /\{\s*id:\s*"magalu"[\s\S]*?enabled:\s*true/);
+  assert.match(content, /\{\s*id:\s*"americanas"[\s\S]*?enabled:\s*true/);
+  assert.match(content, /MARKET_SOURCE_CONFIG_VERSION = 4/);
 });
 
 test("background capture keeps focus on the current tab while collecting evidence", () => {
