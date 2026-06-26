@@ -31,6 +31,48 @@ function createAppServer({ searchProvidersImpl = searchProviders } = {}) {
       return;
     }
 
+    if (request.method === "POST" && request.url === "/capture") {
+      if (TOKEN && getToken(request) !== TOKEN) {
+        sendJson(response, 401, { error: "Unauthorized" });
+        return;
+      }
+
+      const body = await readJson(request);
+      const url = String(body.url || "").trim();
+      if (!url) {
+        sendJson(response, 400, { error: "URL is required" });
+        return;
+      }
+
+      const startedAt = Date.now();
+      const browser = await getBrowser();
+      const context = await browser.newContext({
+        locale: "pt-BR",
+        timezoneId: "America/Sao_Paulo",
+        viewport: { width: 1280, height: 800 },
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+      });
+
+      const page = await context.newPage();
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
+        await page.waitForTimeout(2000); // Aguarda 2s para renderização e imagens
+        const screenshotBuffer = await page.screenshot({ type: "png", fullPage: false });
+        const base64 = `data:image/png;base64,${screenshotBuffer.toString("base64")}`;
+        sendJson(response, 200, {
+          screenshot: base64,
+          meta: {
+            url,
+            elapsedMs: Date.now() - startedAt
+          }
+        });
+      } finally {
+        await page.close();
+        await context.close();
+      }
+      return;
+    }
+
     if (request.method !== "POST" || request.url !== "/search") {
       sendJson(response, 404, { error: "Not found" });
       return;
