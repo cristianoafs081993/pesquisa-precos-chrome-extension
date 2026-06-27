@@ -39,6 +39,8 @@ function createAppServer({ searchProvidersImpl = searchProviders } = {}) {
 
       const body = await readJson(request);
       const url = String(body.url || "").trim();
+      const cep = normalizeFreightZip(String(body.cep || "").trim());
+
       if (!url) {
         sendJson(response, 400, { error: "URL is required" });
         return;
@@ -55,14 +57,31 @@ function createAppServer({ searchProvidersImpl = searchProviders } = {}) {
 
       const page = await context.newPage();
       try {
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-        await page.waitForTimeout(2000); // Aguarda 2s para renderização e imagens
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
+        await page.waitForTimeout(2500);
+
+        // Captura frete automaticamente para Amazon com CEP
+        let freight = { status: "pending", total: null, cep: cep || "", text: "Fornecedor sem captura automatica de frete." };
+        if (cep && isAmazonUrl(url)) {
+          try {
+            freight = await extractAmazonFreightPlaywright(page, cep);
+          } catch (freightErr) {
+            freight = { status: "pending", total: null, cep, text: String(freightErr.message || "Falha ao capturar frete.") };
+          }
+        } else if (!cep && isAmazonUrl(url)) {
+          freight = { status: "pending", total: null, cep: "", text: "CEP nao configurado." };
+        }
+
+        // Aguarda um pouco mais para a página estabilizar antes do screenshot
+        await page.waitForTimeout(1000);
         const screenshotBuffer = await page.screenshot({ type: "png", fullPage: false });
         const base64 = `data:image/png;base64,${screenshotBuffer.toString("base64")}`;
         sendJson(response, 200, {
           screenshot: base64,
+          freight,
           meta: {
             url,
+            cep: cep || null,
             elapsedMs: Date.now() - startedAt
           }
         });
@@ -508,6 +527,170 @@ function hostname(value) {
     return "";
   }
 }
+
+// ── Freight helpers (portado do background.js da extensão) ──────────────────
+
+function normalizeFreightZip(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits.length === 8 ? digits : "";
+}
+
+function isAmazonUrl(url) {
+  try {
+    return /amazon\.com\.br/i.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeFreightResult(result, cep) {
+  if (result?.status === "free") {
+    return { status: "free", total: 0, cep, text: result.text || "Frete gratis" };
+  }
+  if (result?.status === "captured" && Number.isFinite(Number(result.total))) {
+    return { status: "captured", total: Number(result.total), cep, text: result.text || "" };
+  }
+  return { status: "pending", total: null, cep, text: result?.text || "Frete nao encontrado automaticamente." };
+}
+
+/**
+ * Extrai o frete da Amazon usando Playwright (page.evaluate).
+ * Porta fielmente a função extractAmazonFreight do background.js da extensão Chrome.
+ */
+async function extractAmazonFreightPlaywright(page, cep) {
+  const zipDigits = String(cep || "").replace(/\D/g, "");
+  if (zipDigits.length !== 8) {
+    return { status: "pending", total: null, cep, text: "CEP invalido." };
+  }
+
+  // Injeta e executa a lógica de frete dentro do contexto da página
+  const result = await page.evaluate(async (zipDigits) => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const formattedZip = `${zipDigits.slice(0, 5)}-${zipDigits.slice(5)}`;
+    const normalizeText = (v) => String(v || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+    const textOf = (el) => String(el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
+    const clickFirst = (selectors) => {
+      const el = selectors.map((s) => document.querySelector(s)).find(Boolean);
+      if (el) { el.click(); return true; }
+      return false;
+    };
+    const setInputValue = (input, value) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const parseCurrencyValue = (value) => {
+      const match = String(value || "").match(/R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})|R\$\s*\d+(?:,\d{2})/i);
+      if (!match) return null;
+      const number = Number(match[0].replace(/[^\d,]/g, "").replace(",", "."));
+      return Number.isFinite(number) ? number : null;
+    };
+    const parseFreightCurrency = (value) => {
+      const text = String(value || "");
+      const m1 = text.match(/(?:frete|entrega|envio)[^R$]{0,80}(R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})|R\$\s*\d+(?:,\d{2}))/i);
+      if (m1) return parseCurrencyValue(m1[1]);
+      const m2 = text.match(/(R\$\s*\d{1,3}(?:\.\d{3})*(?:,\d{2})|R\$\s*\d+(?:,\d{2}))[^R$]{0,80}(?:frete|entrega|envio)/i);
+      if (m2) return parseCurrencyValue(m2[1]);
+      return null;
+    };
+    const pageZipMatches = () => {
+      const locationText = [
+        "#nav-global-location-popover-link",
+        "#contextualIngressPtLabel_deliveryShortLine",
+        "#glow-ingress-line1",
+        "#glow-ingress-line2"
+      ].map((s) => textOf(document.querySelector(s))).join(" ");
+      return locationText.replace(/\D/g, "").includes(zipDigits);
+    };
+    const fillCepInputs = () => {
+      const firstPart = document.querySelector("#GLUXZipUpdateInput_0");
+      const secondPart = document.querySelector("#GLUXZipUpdateInput_1");
+      if (firstPart && secondPart) {
+        setInputValue(firstPart, zipDigits.slice(0, 5));
+        setInputValue(secondPart, zipDigits.slice(5));
+        return true;
+      }
+      const singleInput = document.querySelector("#GLUXZipUpdateInput, input[name='zipCode'], input[autocomplete='postal-code']");
+      if (singleInput) { setInputValue(singleInput, formattedZip); return true; }
+      return false;
+    };
+    const applyCepWithGlowApi = async () => {
+      const csrfToken = document.querySelector(".GLUX_Popover meta[name='anti-csrftoken-a2z']")?.content ||
+        document.querySelector("meta[name='anti-csrftoken-a2z']")?.content ||
+        document.querySelector("#glowValidationToken")?.value || "";
+      try {
+        const res = await fetch("/portal-migration/hz/glow/address-change?actionSource=glow", {
+          method: "POST", credentials: "include",
+          headers: { "accept": "text/html,*/*", "anti-csrftoken-a2z": csrfToken, "content-type": "application/json", "x-requested-with": "XMLHttpRequest" },
+          body: JSON.stringify({ locationType: "LOCATION_INPUT", zipCode: formattedZip, deviceType: "web", storeContext: "home", pageType: "Detail", actionSource: "glow" })
+        });
+        if (!res.ok) return false;
+        const text = await res.text();
+        if (!text) return true;
+        try { const d = JSON.parse(text); return d?.isAddressUpdated === 1 || d?.successful === 1 || d?.isValidAddress === 1; } catch { return true; }
+      } catch { return false; }
+    };
+    const findFreightText = () => {
+      const prioritySelectors = [
+        "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
+        "#mir-layout-DELIVERY_BLOCK-slot-SECONDARY_DELIVERY_MESSAGE_LARGE",
+        "#deliveryBlockMessage", "#deliveryBlock_feature_div",
+        "#contextualIngressPtLabel_deliveryShortLine", "#rightCol", "#buybox"
+      ];
+      const nodes = [...prioritySelectors.flatMap((s) => Array.from(document.querySelectorAll(s))), ...Array.from(document.querySelectorAll("span, div, p, li"))];
+      const seen = new Set();
+      const candidates = nodes.map(textOf).filter(Boolean).filter((text) => {
+        const key = normalizeText(text).toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return /(frete|entrega|envio|gratis)/i.test(key) && !/prime video|ofertas exclusivas|aproveite|teste gratis|assinatura|audible/i.test(key);
+      }).slice(0, 120).map((text) => ({ text, normalized: normalizeText(text).toLowerCase() }));
+      for (const candidate of candidates) {
+        if (/(?:frete|entrega|envio).{0,40}gratis|gratis.{0,40}(?:frete|entrega|envio)/i.test(candidate.normalized)) {
+          return { status: "free", total: 0, text: candidate.text };
+        }
+        if (/(frete|entrega|envio)/i.test(candidate.normalized)) {
+          const total = parseFreightCurrency(candidate.text);
+          if (total !== null) return { status: "captured", total, text: candidate.text };
+        }
+      }
+      return { status: "pending", total: null, text: candidates[0]?.text || "" };
+    };
+
+    if (pageZipMatches()) {
+      const already = findFreightText();
+      if (already.status !== "pending") return already;
+    }
+
+    clickFirst(["#nav-global-location-popover-link", "#contextualIngressPtLabel_deliveryShortLine", "#glow-ingress-block", "[data-action='GLUXAddressBlockAction']"]);
+    await sleep(1200);
+
+    if (fillCepInputs()) {
+      await sleep(200);
+      clickFirst(["input[aria-labelledby='GLUXZipUpdate-announce']", "#GLUXZipUpdate", "span#GLUXZipUpdate input", "button[name='glowDoneButton']"]);
+      await sleep(2500);
+      clickFirst(["button[name='glowDoneButton']", "#GLUXConfirmClose", ".a-popover-footer button", "input[data-action-type='SELECT_LOCATION']"]);
+      await sleep(1200);
+    } else {
+      await applyCepWithGlowApi();
+      await sleep(2500);
+    }
+
+    const captured = findFreightText();
+    if (captured.status !== "pending" && pageZipMatches()) return captured;
+    return {
+      status: "pending", total: null,
+      text: pageZipMatches()
+        ? captured.text || "Frete nao encontrado no bloco de entrega da Amazon."
+        : `CEP ${formattedZip} nao foi aplicado pela Amazon antes da leitura do frete.`
+    };
+  }, zipDigits);
+
+  return normalizeFreightResult(result, cep);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 
 module.exports = {
   createAppServer,
